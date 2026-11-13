@@ -29,7 +29,7 @@ app.use(express.urlencoded({ extended: true }));
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const PORT = process.env.PORT || 3000;
-const GUILD_ID = process.env.GUILD_ID || "1569479498741579776";
+const GUILD_ID = process.env.GUILD_ID || "1552438137299664977";
 const FULL_COMMAND_ACCESS_ROLE = "1570780402363400262";
 const MAIN_ACCESS_ROLE = "1569493916108066966";
 const ADMIN_ROLE = "1569494503662821448";
