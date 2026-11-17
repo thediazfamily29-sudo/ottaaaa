@@ -294,6 +294,70 @@ function createLuaTemplate(u, k, endpoint, displayName) {
   ].join("\n");
 }
 
+
+function createCustomerProfileEmbed(user, account) {
+  const tickets = Array.isArray(account.tickets) ? account.tickets : [];
+  const openTickets = tickets.filter((ticket) =>
+    ["open", "pending", "in_progress"].includes(String(ticket.status || "").toLowerCase())
+  ).length;
+  const moderationHistory = Array.isArray(account.moderationHistory) ? account.moderationHistory : [];
+  const hwidResetHistory = Array.isArray(account.hwidResetHistory) ? account.hwidResetHistory : [];
+  const staffNotes = Array.isArray(account.staffNotes) ? account.staffNotes : [];
+  const flags = Array.isArray(account.flags) ? account.flags : [];
+  const latestTicket = tickets.length ? tickets[tickets.length - 1] : null;
+  const coreSince = account.createdAt || account.keyCreatedAt || Date.now();
+  const keyState = account.status === "disabled" ? "Disabled" : (account.key ? "Active" : "Not synced");
+  const hwidState = account.hwid ? "Locked" : "Unknown";
+  const latestKeyRequest = account.latestKeyRequest
+    ? String(account.latestKeyRequest)
+    : "None";
+  const recentTickets = tickets.length
+    ? tickets.slice(-3).reverse().map((ticket) => {
+        const label = ticket.subject || ticket.title || ("Ticket #" + (ticket.id || "—"));
+        return "• " + String(label).slice(0, 80) + " — " + String(ticket.status || "Open");
+      }).join("\n")
+    : "None";
+
+  return new EmbedBuilder()
+    .setColor(0xF2A9D4)
+    .setAuthor({
+      name: "JJSTUDIOS",
+      iconURL: user.displayAvatarURL({ size: 128 })
+    })
+    .setTitle("Customer Profile")
+    .setDescription(user.toString())
+    .addFields(
+      { name: "Products", value: "No synced products yet.", inline: false },
+      { name: "Key State", value: keyState, inline: true },
+      { name: "HWID", value: hwidState, inline: true },
+      { name: "Executions", value: String(Number(account.executions) || 0), inline: true },
+      { name: "Tickets", value: openTickets + " open · " + tickets.length + " total", inline: true },
+      { name: "Moderation", value: moderationHistory.length + " record(s)", inline: true },
+      { name: "HWID Reset History", value: hwidResetHistory.length + " request(s)", inline: true },
+      { name: "Staff Notes", value: staffNotes.length + " note(s)", inline: true },
+      { name: "Flags", value: flags.length ? flags.join(", ").slice(0, 1000) : "None", inline: true },
+      { name: "Core Customer Since", value: "<t:" + Math.floor(Number(coreSince) / 1000) + ":f>", inline: true },
+      { name: "Latest Key Request", value: latestKeyRequest.slice(0, 1000), inline: false },
+      { name: "Recent Tickets", value: recentTickets.slice(0, 1000), inline: false }
+    )
+    .setFooter({ text: "JJSTUDIOS · Core" });
+}
+
+function createCustomerProfileComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("jj_accounts_reset").setLabel("Request HWID Reset").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("jj_accounts_issues").setLabel("Known Issues").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("jj_accounts_updates").setLabel("Latest Updates").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("jj_accounts_tickets").setLabel("My Tickets").setStyle(ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("jj_accounts_notifications").setLabel("Notification Preferences").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("jj_accounts_refresh").setLabel("Refresh").setStyle(ButtonStyle.Secondary)
+    )
+  ];
+}
+
 function createPanel() {
   const embed = new EmbedBuilder()
     .setColor(0xEAF4FF)
@@ -348,6 +412,55 @@ client.on("interactionCreate", async (interaction) => {
     : null;
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("jj_accounts_")) {
+      const db = readDB();
+      const accountName = findAccountByDiscordId(db, interaction.user.id);
+      if (!accountName || !db[accountName]) {
+        return interaction.reply({ content: "You do not have a linked JJSTUDIOS account yet.", flags: MessageFlags.Ephemeral });
+      }
+
+      const account = db[accountName];
+      const profileAction = interaction.customId.slice("jj_accounts_".length);
+
+      if (profileAction === "refresh") {
+        return interaction.update({
+          embeds: [createCustomerProfileEmbed(interaction.user, account)],
+          components: createCustomerProfileComponents()
+        });
+      }
+
+      if (profileAction === "reset") {
+        const lastReset = Number(account.lastHwidReset) || 0;
+        if (now() - lastReset < RESET_COOLDOWN) {
+          const minutesLeft = Math.ceil((RESET_COOLDOWN - (now() - lastReset)) / 60000);
+          return interaction.reply({
+            content: "Your HWID reset cooldown is active. Try again in " + minutesLeft + " minute(s).",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+        account.hwid = null;
+        account.lastHwidReset = now();
+        if (!Array.isArray(account.hwidResetHistory)) account.hwidResetHistory = [];
+        account.hwidResetHistory.push({ requestedAt: now(), discordId: interaction.user.id });
+        writeDB(db);
+        return interaction.update({
+          embeds: [createCustomerProfileEmbed(interaction.user, account)],
+          components: createCustomerProfileComponents()
+        });
+      }
+
+      const messages = {
+        issues: "Known issues are not published yet. Please check back later.",
+        updates: "There are no published JJSTUDIOS updates yet.",
+        tickets: "You have " + (Array.isArray(account.tickets) ? account.tickets.length : 0) + " ticket(s) on your account.",
+        notifications: "Notification preferences are not configured yet."
+      };
+      return interaction.reply({
+        content: messages[profileAction] || "This profile action is not available.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
     const action = interaction.customId.slice(3);
     const validActions = ["register", "key", "main", "mobilemain", "resethwid"];
 
@@ -458,6 +571,22 @@ client.on("interactionCreate", async (interaction) => {
 
   try {
     const db = readDB();
+
+    if (interaction.commandName === "accounts") {
+      const accountName = findAccountByDiscordId(db, interaction.user.id);
+      if (!accountName || !db[accountName]) {
+        return interaction.reply({
+          content: "You do not have a linked JJSTUDIOS account yet.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+      return interaction.reply({
+        embeds: [createCustomerProfileEmbed(interaction.user, db[accountName])],
+        components: createCustomerProfileComponents(),
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
     if (interaction.commandName !== "jamari") return;
 
     const subcommand = interaction.options.getSubcommand();
@@ -642,7 +771,12 @@ function buildCommands() {
   json.dm_permission = true;
   json.contexts = [0, 1, 2];
   json.integration_types = [0, 1];
-  return [json];
+  const accountsCommand = new SlashCommandBuilder()
+    .setName("accounts")
+    .setDescription("View your JJSTUDIOS customer profile")
+    .setDMPermission(false);
+
+  return [json, accountsCommand.toJSON()];
 }
 
 const commandLayouts = buildCommands();
