@@ -38,6 +38,7 @@ const USERINFO_ROLES = ["1552637829815865414", ADMIN_ROLE, FULL_COMMAND_ACCESS_R
 const RESET_COOLDOWN = 1000 * 60 * 15;
 const KEY_LIFETIME = 1000 * 60 * 60 * 24 * 30;
 const ACCOUNT_CREATED_LOG_CHANNEL_ID = "1572100117605912597";
+const SCRIPT_EXECUTION_LOG_CHANNEL_ID = "1572100117605912597";
 const EXPIRATION_NOTICE_3_DAYS = 1000 * 60 * 60 * 24 * 3;
 const EXPIRATION_NOTICE_15_HOURS = 1000 * 60 * 60 * 15;
 const EXPIRATION_NOTICE_CHECK_INTERVAL = 5 * 60 * 1000;
@@ -199,6 +200,42 @@ function getPanelAccessMessage(action) {
   return "You need access to use this button.";
 }
 
+// Logs a successful loader authentication and script delivery.
+// This confirms the server returned the loader; it cannot confirm execution inside Roblox.
+async function sendScriptExecutionLog(username, scriptName, discordId) {
+  try {
+    if (!client.isReady()) return;
+
+    const logChannel = await client.channels.fetch(SCRIPT_EXECUTION_LOG_CHANNEL_ID);
+    if (!logChannel || !logChannel.isTextBased() || typeof logChannel.send !== "function") {
+      throw new Error("Script execution log channel is unavailable or is not a text channel.");
+    }
+
+    const discordValue = discordId ? "<@" + String(discordId) + ">" : "Not linked";
+
+    const executionEmbed = new EmbedBuilder()
+      .setColor(0xF2A9D4)
+      .setTitle("LOADER AUTHENTICATED")
+      .setDescription("A loader request passed account authentication and the script was returned.")
+      .addFields(
+        { name: "Account", value: "`" + String(username).slice(0, 100) + "`", inline: true },
+        { name: "Script", value: scriptName === "main" ? "Main" : "Mobile", inline: true },
+        { name: "Discord User", value: discordValue, inline: true },
+        { name: "Status", value: "Authenticated · Script delivered", inline: false },
+        { name: "Time", value: "<t:" + Math.floor(Date.now() / 1000) + ":F>", inline: false }
+      )
+      .setFooter({ text: "JJSTUDIOS · Execution Logs" })
+      .setTimestamp();
+
+    await logChannel.send({
+      embeds: [executionEmbed],
+      allowedMentions: { parse: [] }
+    });
+  } catch (logError) {
+    console.error("[SCRIPT EXECUTION LOG ERROR]", logError);
+  }
+}
+
 function createLoadHandler(scriptName) {
   return async (req, res) => {
     try {
@@ -248,6 +285,9 @@ function createLoadHandler(scriptName) {
         "  if not success then error(err or 'Unknown Lua error') end",
         "end)"
       ].join("\n");
+
+      // Fire the log asynchronously so Discord logging cannot delay the loader response.
+      void sendScriptExecutionLog(cleanUser, scriptName, user.discordId);
 
       return res.json({ success: true, chunk: finalScript.trim() });
     } catch (err) {
