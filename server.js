@@ -177,7 +177,8 @@ function hasAnyRole(member, roleIds) {
 
 function hasAccess(member, requiredRoleIds) {
   if (!member) return false;
-  if (hasAnyRole(member, [FULL_COMMAND_ACCESS_ROLE])) return true;
+  // Admin and full-access roles bypass individual panel role requirements.
+  if (hasAnyRole(member, [ADMIN_ROLE, FULL_COMMAND_ACCESS_ROLE])) return true;
   return hasAnyRole(member, requiredRoleIds || []);
 }
 
@@ -337,28 +338,35 @@ function createPanelModal(action) {
 }
 
 client.on("interactionCreate", async (interaction) => {
-  const member = await getMemberRoles(interaction.user.id);
-
   if (!interaction.isChatInputCommand() && !interaction.isButton() && !interaction.isModalSubmit()) {
     return;
   }
 
-  if (!interaction.isChatInputCommand() && !hasAccess(member, [ADMIN_ROLE])) {
-    if (interaction.deferred || interaction.replied) {
-      return interaction.followUp({
-        content: "You need the admin role to use this bot.",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-    return interaction.reply({
-      content: "You need the admin role to use this bot.",
-      flags: MessageFlags.Ephemeral
-    });
-  }
+  // Resolve the member only after confirming this is an interaction we handle.
+  const member = interaction.guildId
+    ? await getMemberRoles(interaction.user.id)
+    : null;
 
   if (interaction.isButton()) {
     const action = interaction.customId.slice(3);
-    if (interaction.customId.startsWith("jc_") && ["register", "key", "main", "mobilemain", "resethwid"].includes(action)) {
+    const validActions = ["register", "key", "main", "mobilemain", "resethwid"];
+
+    if (interaction.customId.startsWith("jc_") && validActions.includes(action)) {
+      const buttonRoleMap = {
+        register: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
+        key: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
+        main: [MAIN_ACCESS_ROLE],
+        mobilemain: [MOBILE_MAIN_ROLE],
+        resethwid: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE]
+      };
+
+      if (!hasAccess(member, buttonRoleMap[action])) {
+        return interaction.reply({
+          content: getPanelAccessMessage(action),
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
       return interaction.showModal(createPanelModal(action));
     }
     return;
