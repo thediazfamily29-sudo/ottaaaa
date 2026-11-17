@@ -781,6 +781,47 @@ function buildCommands() {
 
 const commandLayouts = buildCommands();
 
+// JJSTUDIOS Ticket Bot - Secure Accounts API
+// This endpoint exposes only usernames, account status, and allowed script names.
+// It never returns passwords, keys, HWIDs, Discord IDs, or account records.
+app.get("/api/accounts", (req, res) => {
+  const secret = process.env.ACCOUNTS_API_SECRET;
+  const providedSecret = req.get("x-api-secret");
+
+  if (!secret || !providedSecret || providedSecret !== secret) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized"
+    });
+  }
+
+  try {
+    const db = readDB();
+    const accounts = getAccountKeys(db).map((username) => {
+      const account = db[username] && typeof db[username] === "object"
+        ? db[username]
+        : {};
+
+      return {
+        username,
+        status: account.status || "active",
+        scripts: Array.isArray(account.allowedScripts)
+          ? account.allowedScripts.filter((script) => typeof script === "string")
+          : []
+      };
+    });
+
+    res.set("Cache-Control", "no-store");
+    return res.json({ success: true, accounts });
+  } catch (error) {
+    console.error("[ACCOUNTS API ERROR]", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to retrieve accounts"
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log("[EXPRESS SERVICE RUNNING] Listening on incoming gateway port " + PORT);
 });
