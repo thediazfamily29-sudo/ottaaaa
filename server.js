@@ -37,6 +37,10 @@ const MOBILE_MAIN_ROLE = "1554321313332469800";
 const USERINFO_ROLES = ["1552637829815865414", ADMIN_ROLE, FULL_COMMAND_ACCESS_ROLE];
 const RESET_COOLDOWN = 1000 * 60 * 15;
 const KEY_LIFETIME = 1000 * 60 * 60 * 24 * 30;
+const ACCOUNT_CREATED_LOG_CHANNEL_ID = "1572100117605912597";
+const EXPIRATION_NOTICE_3_DAYS = 1000 * 60 * 60 * 24 * 3;
+const EXPIRATION_NOTICE_15_HOURS = 1000 * 60 * 60 * 15;
+const EXPIRATION_NOTICE_CHECK_INTERVAL = 5 * 60 * 1000;
 
 const DB_BASE = (() => {
   if (process.env.RENDER_DISK_PATH) return process.env.RENDER_DISK_PATH;
@@ -528,6 +532,35 @@ client.on("interactionCreate", async (interaction) => {
         keyCreatedAt: createdAt
       };
       writeDB(db);
+
+      // Send a private account-created log to the JJSTUDIOS staff channel.
+      // Never include the account password or generated key in this notification.
+      try {
+        const logChannel = await client.channels.fetch(ACCOUNT_CREATED_LOG_CHANNEL_ID);
+        if (!logChannel || !logChannel.isTextBased() || typeof logChannel.send !== "function") {
+          throw new Error("Account log channel is unavailable or is not a text channel.");
+        }
+
+        const accountCreatedEmbed = new EmbedBuilder()
+          .setColor(0xF2A9D4)
+          .setTitle("NEW ACCOUNT CREATED")
+          .setDescription("A new JJSTUDIOS account has been registered.")
+          .addFields(
+            { name: "Username", value: "`" + username + "`", inline: true },
+            { name: "Discord User", value: interaction.user.toString(), inline: true },
+            { name: "Discord ID", value: interaction.user.id, inline: false },
+            { name: "Scripts", value: (db[username].allowedScripts || []).join(", ") || "None", inline: true },
+            { name: "Status", value: "Active", inline: true },
+            { name: "Created", value: "<t:" + Math.floor(createdAt / 1000) + ":F>", inline: false }
+          )
+          .setFooter({ text: "JJSTUDIOS" })
+          .setTimestamp(new Date(createdAt));
+
+        await logChannel.send({ embeds: [accountCreatedEmbed] });
+      } catch (logError) {
+        console.error("[ACCOUNT CREATED LOG ERROR]", logError);
+      }
+
       return interaction.reply({
         content: "**Account Created!**\n• **Username:** `" + username + "`\n• **Key:** `" + db[username].key + "`\n• **Expires On:** " + formatDate(createdAt + KEY_LIFETIME) + "\n• **Scripts:** " + (db[username].allowedScripts || []).join(", ") + "\n• **Device Lock:** Open",
         flags: MessageFlags.Ephemeral
@@ -901,8 +934,98 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// Send each account owner a private reminder before their access expires.
+// A reminder is recorded only after Discord accepts the DM, preventing repeats.
+let expirationNoticeCheckRunning = false;
+
+async function checkAccountExpirationNotices() {
+  if (expirationNoticeCheckRunning || !client.isReady()) return;
+  expirationNoticeCheckRunning = true;
+
+  try {
+    const db = readDB();
+    const currentTime = now();
+    let databaseChanged = false;
+
+    for (const username of getAccountKeys(db)) {
+      const account = db[username];
+      if (!account || account.status === "disabled" || !account.discordId) continue;
+
+      const createdAt = Number(account.keyCreatedAt);
+      if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
+
+      const expiresAt = createdAt + KEY_LIFETIME;
+      const timeRemaining = expiresAt - currentTime;
+      if (timeRemaining <= 0) continue;
+
+      if (!account.expirationNotices || typeof account.expirationNotices !== "object") {
+        account.expirationNotices = {};
+      }
+
+      let noticeKey = null;
+      let noticeLabel = null;
+
+      // If the bot was offline and both reminder windows passed, send only
+      // the more urgent 15-hour reminder rather than two messages at once.
+      if (timeRemaining <= EXPIRATION_NOTICE_15_HOURS) {
+        if (!account.expirationNotices.fifteenHoursSentAt) {
+          noticeKey = "fifteenHoursSentAt";
+          noticeLabel = "15-hour reminder";
+        }
+      } else if (timeRemaining <= EXPIRATION_NOTICE_3_DAYS) {
+        if (!account.expirationNotices.threeDaysSentAt) {
+          noticeKey = "threeDaysSentAt";
+          noticeLabel = "3-day reminder";
+        }
+      }
+
+      if (!noticeKey) continue;
+
+      try {
+        const user = await client.users.fetch(String(account.discordId));
+        const productNames = (Array.isArray(account.allowedScripts) ? account.allowedScripts : [])
+          .map((script) => script === "main" ? "Upgraded Main" : script === "mobile" ? "Mobile" : String(script))
+          .join(", ") || "No active products";
+
+        const reminderEmbed = new EmbedBuilder()
+          .setColor(0xF2A9D4)
+          .setAuthor({ name: "JJSTUDIOS" })
+          .setTitle("JJSTUDIOS Access")
+          .setDescription(
+            "Your access is getting close to its expiration.\n\n" +
+            "This is your " + noticeLabel + "."
+          )
+          .addFields(
+            {
+              name: "Expires",
+              value: "<t:" + Math.floor(expiresAt / 1000) + ":F> · <t:" + Math.floor(expiresAt / 1000) + ":R>",
+              inline: false
+            },
+            { name: "Products", value: productNames.slice(0, 1024), inline: false }
+          )
+          .setFooter({ text: "JJSTUDIOS" });
+
+        await user.send({ embeds: [reminderEmbed] });
+        account.expirationNotices[noticeKey] = currentTime;
+        databaseChanged = true;
+        console.log("[EXPIRATION NOTICE] Sent " + noticeLabel + " to account " + username);
+      } catch (dmError) {
+        console.error("[EXPIRATION NOTICE] Could not DM account " + username + ":", dmError.message);
+      }
+    }
+
+    if (databaseChanged) writeDB(db);
+  } catch (error) {
+    console.error("[EXPIRATION NOTICE CHECK ERROR]", error);
+  } finally {
+    expirationNoticeCheckRunning = false;
+  }
+}
+
 client.once("ready", async () => {
   console.log("[Bot Online] Logged into Discord as " + client.user.tag);
+  checkAccountExpirationNotices();
+  setInterval(checkAccountExpirationNotices, EXPIRATION_NOTICE_CHECK_INTERVAL);
   const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
 
   try {
