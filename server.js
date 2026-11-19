@@ -80,6 +80,7 @@ for (const [fileName, scriptKey] of scriptFiles) {
 process.on("unhandledRejection", (reason) => {
   console.error("[CRASH SHIELD] Unhandled Rejection:", reason);
 });
+
 process.on("uncaughtException", (err) => {
   console.error("[CRASH SHIELD] Uncaught Exception:", err);
 });
@@ -131,7 +132,9 @@ function readDB() {
     return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   } catch (e) {
     console.error("[DATABASE ENGINE CORRUPTION] Auto-repairing sync...", e);
-    try { fs.writeFileSync(DB_PATH, "{}", "utf8"); } catch (_) {}
+    try {
+      fs.writeFileSync(DB_PATH, "{}", "utf8");
+    } catch (_) {}
     return {};
   }
 }
@@ -182,7 +185,6 @@ function hasAnyRole(member, roleIds) {
 
 function hasAccess(member, requiredRoleIds) {
   if (!member) return false;
-  // Admin and full-access roles bypass individual panel role requirements.
   if (hasAnyRole(member, [ADMIN_ROLE, FULL_COMMAND_ACCESS_ROLE])) return true;
   return hasAnyRole(member, requiredRoleIds || []);
 }
@@ -201,8 +203,8 @@ function getPanelAccessMessage(action) {
 }
 
 // Logs a successful loader authentication and script delivery.
-// This confirms the server returned the loader; it cannot confirm execution inside Roblox.
-async function sendScriptExecutionLog(username, scriptName, discordId) {
+// The executor value is supplied by the loader request.
+async function sendScriptExecutionLog(username, scriptName, discordId, executorName) {
   try {
     if (!client.isReady()) return;
 
@@ -212,6 +214,9 @@ async function sendScriptExecutionLog(username, scriptName, discordId) {
     }
 
     const discordValue = discordId ? "<@" + String(discordId) + ">" : "Not linked";
+    const safeExecutor = typeof executorName === "string" && executorName.trim()
+      ? executorName.trim().slice(0, 100)
+      : "Unknown";
 
     const executionEmbed = new EmbedBuilder()
       .setColor(0xF2A9D4)
@@ -220,6 +225,7 @@ async function sendScriptExecutionLog(username, scriptName, discordId) {
       .addFields(
         { name: "Account", value: "`" + String(username).slice(0, 100) + "`", inline: true },
         { name: "Script", value: scriptName === "main" ? "Main" : "Mobile", inline: true },
+        { name: "Executor", value: "`" + safeExecutor.replace(/`/g, "'") + "`", inline: true },
         { name: "Discord User", value: discordValue, inline: true },
         { name: "Status", value: "Authenticated · Script delivered", inline: false },
         { name: "Time", value: "<t:" + Math.floor(Date.now() / 1000) + ":F>", inline: false }
@@ -240,13 +246,19 @@ function createLoadHandler(scriptName) {
   return async (req, res) => {
     try {
       const db = readDB();
+
       if (db.__meta && db.__meta.maintenanceMode) {
         return res.json({ success: false, reason: "**Bot was shut down**" });
       }
-      const { username, key, hwid } = req.body;
+
+      const { username, key, hwid, executor } = req.body;
       const cleanUser = safeString(username);
+
       if (!cleanUser || typeof key !== "string" || !key.trim() || typeof hwid !== "string" || !hwid.trim()) {
-        return res.status(400).json({ success: false, reason: "Username, key, and HWID are required" });
+        return res.status(400).json({
+          success: false,
+          reason: "Username, key, and HWID are required"
+        });
       }
 
       const user = db[cleanUser];
@@ -258,11 +270,13 @@ function createLoadHandler(scriptName) {
       if (!Number.isFinite(keyCreatedAt) || now() - keyCreatedAt >= KEY_LIFETIME) {
         return res.json({ success: false, reason: "Your key has expired" });
       }
+
       if (!user.allowedScripts || !user.allowedScripts.includes(scriptName)) {
         return res.json({ success: false, reason: "**No Access**" });
       }
 
       const cleanHwid = hwid.trim();
+
       if (!user.hwid) {
         user.hwid = cleanHwid;
         user.hwidLockedAt = now();
@@ -271,10 +285,14 @@ function createLoadHandler(scriptName) {
       }
 
       writeDB(db);
+
       const scriptCode = SCRIPTS[scriptName];
-      if (!scriptCode) return res.json({ success: false, reason: "Script content missing on server files." });
+      if (!scriptCode) {
+        return res.json({ success: false, reason: "Script content missing on server files." });
+      }
 
       const encodedScript = JSON.stringify(scriptCode);
+
       const finalScript = [
         "task.spawn(function()",
         "  local success, err = pcall(function()",
@@ -286,20 +304,36 @@ function createLoadHandler(scriptName) {
         "end)"
       ].join("\n");
 
-      // Fire the log asynchronously so Discord logging cannot delay the loader response.
-      void sendScriptExecutionLog(cleanUser, scriptName, user.discordId);
+      void sendScriptExecutionLog(
+        cleanUser,
+        scriptName,
+        user.discordId,
+        executor
+      );
 
-      return res.json({ success: true, chunk: finalScript.trim() });
+      return res.json({
+        success: true,
+        chunk: finalScript.trim()
+      });
     } catch (err) {
       console.error("[API PROCESS FAILURE] Web execution loop error:", err);
-      return res.status(500).json({ success: false, reason: "Something went wrong. Please try again." });
+      return res.status(500).json({
+        success: false,
+        reason: "Something went wrong. Please try again."
+      });
     }
   };
 }
 
 app.post("/load/main", createLoadHandler("main"));
 app.post("/load/mobile", createLoadHandler("mobile"));
-app.get("/health", (req, res) => res.status(200).json({ status: "ok", scriptsLoaded: Object.keys(SCRIPTS).length }));
+
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    scriptsLoaded: Object.keys(SCRIPTS).length
+  });
+});
 
 function createLuaTemplate(u, k, endpoint, displayName) {
   const domain = process.env.RENDER_EXTERNAL_URL
@@ -313,6 +347,15 @@ function createLuaTemplate(u, k, endpoint, displayName) {
     `local HWID = game:GetService("RbxAnalyticsService"):GetClientId()`,
     `local HttpService = game:GetService("HttpService")`,
     "",
+    "local executorName = 'Unknown'",
+    "pcall(function()",
+    "  if type(identifyexecutor) == 'function' then",
+    "    executorName = tostring(identifyexecutor())",
+    "  elseif type(getexecutorname) == 'function' then",
+    "    executorName = tostring(getexecutorname())",
+    "  end",
+    "end)",
+    "",
     "local ok, response = pcall(function()",
     "  local request = (request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request))",
     "  if not request then error('Executor does not support HTTP requests.') end",
@@ -320,7 +363,12 @@ function createLuaTemplate(u, k, endpoint, displayName) {
     `    Url = "https://${domain}/load/${endpoint}",`,
     "    Method = 'POST',",
     "    Headers = { ['Content-Type'] = 'application/json' },",
-    "    Body = HttpService:JSONEncode({ username = USERNAME, key = KEY, hwid = HWID })",
+    "    Body = HttpService:JSONEncode({",
+    "      username = USERNAME,",
+    "      key = KEY,",
+    "      hwid = HWID,",
+    "      executor = executorName",
+    "    })",
     "  })",
     "end)",
     "",
@@ -338,23 +386,21 @@ function createLuaTemplate(u, k, endpoint, displayName) {
   ].join("\n");
 }
 
-
 function createCustomerProfileEmbed(user, account) {
   const tickets = Array.isArray(account.tickets) ? account.tickets : [];
   const openTickets = tickets.filter((ticket) =>
     ["open", "pending", "in_progress"].includes(String(ticket.status || "").toLowerCase())
   ).length;
+
   const moderationHistory = Array.isArray(account.moderationHistory) ? account.moderationHistory : [];
   const hwidResetHistory = Array.isArray(account.hwidResetHistory) ? account.hwidResetHistory : [];
   const staffNotes = Array.isArray(account.staffNotes) ? account.staffNotes : [];
   const flags = Array.isArray(account.flags) ? account.flags : [];
-  const latestTicket = tickets.length ? tickets[tickets.length - 1] : null;
   const coreSince = account.createdAt || account.keyCreatedAt || Date.now();
   const keyState = account.status === "disabled" ? "Disabled" : (account.key ? "Active" : "Not synced");
   const hwidState = account.hwid ? "Locked" : "Unknown";
-  const latestKeyRequest = account.latestKeyRequest
-    ? String(account.latestKeyRequest)
-    : "None";
+  const latestKeyRequest = account.latestKeyRequest ? String(account.latestKeyRequest) : "None";
+
   const recentTickets = tickets.length
     ? tickets.slice(-3).reverse().map((ticket) => {
         const label = ticket.subject || ticket.title || ("Ticket #" + (ticket.id || "—"));
@@ -433,15 +479,32 @@ function createPanel() {
 }
 
 function createPanelModal(action) {
-  const title = action === "register" ? "Register" : action === "key" ? "Get Key" : action === "main" ? "Main Loader" : action === "mobilemain" ? "Mobile Loader" : "Reset HWID";
-  const modal = new ModalBuilder().setCustomId("jc_modal_" + action).setTitle(title);
+  const title = action === "register" ? "Register" :
+    action === "key" ? "Get Key" :
+    action === "main" ? "Main Loader" :
+    action === "mobilemain" ? "Mobile Loader" : "Reset HWID";
+
+  const modal = new ModalBuilder()
+    .setCustomId("jc_modal_" + action)
+    .setTitle(title);
+
   modal.addComponents(
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("username").setLabel("Username").setStyle(TextInputStyle.Short).setRequired(true)),
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("password").setLabel("Password").setStyle(TextInputStyle.Short).setRequired(true))
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("username").setLabel("Username").setStyle(TextInputStyle.Short).setRequired(true)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("password").setLabel("Password").setStyle(TextInputStyle.Short).setRequired(true)
+    )
   );
+
   if (action === "main" || action === "mobilemain") {
-    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("key").setLabel("Key").setStyle(TextInputStyle.Short).setRequired(true)));
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId("key").setLabel("Key").setStyle(TextInputStyle.Short).setRequired(true)
+      )
+    );
   }
+
   return modal;
 }
 
@@ -450,7 +513,6 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // Resolve the member only after confirming this is an interaction we handle.
   const member = interaction.guildId
     ? await getMemberRoles(interaction.user.id)
     : null;
@@ -459,8 +521,12 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.customId.startsWith("jj_accounts_")) {
       const db = readDB();
       const accountName = findAccountByDiscordId(db, interaction.user.id);
+
       if (!accountName || !db[accountName]) {
-        return interaction.reply({ content: "You do not have a linked JJSTUDIOS account yet.", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "You do not have a linked JJSTUDIOS account yet.",
+          flags: MessageFlags.Ephemeral
+        });
       }
 
       const account = db[accountName];
@@ -475,6 +541,7 @@ client.on("interactionCreate", async (interaction) => {
 
       if (profileAction === "reset") {
         const lastReset = Number(account.lastHwidReset) || 0;
+
         if (now() - lastReset < RESET_COOLDOWN) {
           const minutesLeft = Math.ceil((RESET_COOLDOWN - (now() - lastReset)) / 60000);
           return interaction.reply({
@@ -482,11 +549,18 @@ client.on("interactionCreate", async (interaction) => {
             flags: MessageFlags.Ephemeral
           });
         }
+
         account.hwid = null;
         account.lastHwidReset = now();
+
         if (!Array.isArray(account.hwidResetHistory)) account.hwidResetHistory = [];
-        account.hwidResetHistory.push({ requestedAt: now(), discordId: interaction.user.id });
+        account.hwidResetHistory.push({
+          requestedAt: now(),
+          discordId: interaction.user.id
+        });
+
         writeDB(db);
+
         return interaction.update({
           embeds: [createCustomerProfileEmbed(interaction.user, account)],
           components: createCustomerProfileComponents()
@@ -499,6 +573,7 @@ client.on("interactionCreate", async (interaction) => {
         tickets: "You have " + (Array.isArray(account.tickets) ? account.tickets.length : 0) + " ticket(s) on your account.",
         notifications: "Notification preferences are not configured yet."
       };
+
       return interaction.reply({
         content: messages[profileAction] || "This profile action is not available.",
         flags: MessageFlags.Ephemeral
@@ -526,17 +601,24 @@ client.on("interactionCreate", async (interaction) => {
 
       return interaction.showModal(createPanelModal(action));
     }
+
     return;
   }
 
   if (interaction.isModalSubmit()) {
     if (!interaction.customId.startsWith("jc_modal_")) return;
+
     const action = interaction.customId.slice(9);
     const username = interaction.fields.getTextInputValue("username").trim().toLowerCase();
     const password = interaction.fields.getTextInputValue("password");
     const db = readDB();
 
-    if (!member) return interaction.reply({ content: "You are not in the Jamari server.", flags: MessageFlags.Ephemeral });
+    if (!member) {
+      return interaction.reply({
+        content: "You are not in the Jamari server.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
 
     const actionRoleMap = {
       register: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
@@ -547,19 +629,30 @@ client.on("interactionCreate", async (interaction) => {
     };
 
     if (!hasAccess(member, actionRoleMap[action] || [])) {
-      return interaction.reply({ content: getPanelAccessMessage(action), flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: getPanelAccessMessage(action),
+        flags: MessageFlags.Ephemeral
+      });
     }
 
     if (action === "register") {
       if (username === "__meta" || db[username]) {
-        return interaction.reply({ content: db[username] ? "This username is already taken" : "This username is reserved", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: db[username] ? "This username is already taken" : "This username is reserved",
+          flags: MessageFlags.Ephemeral
+        });
       }
+
       if (getAccountKeys(db).some((name) => db[name].discordId === interaction.user.id)) {
-        return interaction.reply({ content: "You already have an account.", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "You already have an account.",
+          flags: MessageFlags.Ephemeral
+        });
       }
 
       const grantedScripts = getGrantedScriptsForMember(member);
       const createdAt = now();
+
       db[username] = {
         password,
         key: generateKey(),
@@ -571,12 +664,12 @@ client.on("interactionCreate", async (interaction) => {
         discordId: interaction.user.id,
         keyCreatedAt: createdAt
       };
+
       writeDB(db);
 
-      // Send a private account-created log to the JJSTUDIOS staff channel.
-      // Never include the account password or generated key in this notification.
       try {
         const logChannel = await client.channels.fetch(ACCOUNT_CREATED_LOG_CHANNEL_ID);
+
         if (!logChannel || !logChannel.isTextBased() || typeof logChannel.send !== "function") {
           throw new Error("Account log channel is unavailable or is not a text channel.");
         }
@@ -602,42 +695,87 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       return interaction.reply({
-        content: "**Account Created!**\n• **Username:** `" + username + "`\n• **Key:** `" + db[username].key + "`\n• **Expires On:** " + formatDate(createdAt + KEY_LIFETIME) + "\n• **Scripts:** " + (db[username].allowedScripts || []).join(", ") + "\n• **Device Lock:** Open",
+        content:
+          "**Account Created!**\n" +
+          "• **Username:** `" + username + "`\n" +
+          "• **Key:** `" + db[username].key + "`\n" +
+          "• **Expires On:** " + formatDate(createdAt + KEY_LIFETIME) + "\n" +
+          "• **Scripts:** " + (db[username].allowedScripts || []).join(", ") + "\n" +
+          "• **Device Lock:** Open",
         flags: MessageFlags.Ephemeral
       });
     }
 
     const account = db[username];
+
     if (!account || account.password !== password) {
-      return interaction.reply({ content: "Account not found or incorrect password", flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: "Account not found or incorrect password",
+        flags: MessageFlags.Ephemeral
+      });
     }
+
     if (account.status === "disabled") {
-      return interaction.reply({ content: "This account is banned", flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: "This account is banned",
+        flags: MessageFlags.Ephemeral
+      });
     }
+
     if (action === "key") {
-      return interaction.reply({ content: "Your key is: `" + account.key + "`", flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: "Your key is: `" + account.key + "`",
+        flags: MessageFlags.Ephemeral
+      });
     }
+
     if (action === "resethwid") {
       if (now() - (account.lastHwidReset || 0) < RESET_COOLDOWN) {
-        return interaction.reply({ content: "Cooldown active. You can reset once every 15 minutes.", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "Cooldown active. You can reset once every 15 minutes.",
+          flags: MessageFlags.Ephemeral
+        });
       }
+
       account.hwid = null;
       account.lastHwidReset = now();
       writeDB(db);
-      return interaction.reply({ content: "HWID reset!", flags: MessageFlags.Ephemeral });
+
+      return interaction.reply({
+        content: "HWID reset!",
+        flags: MessageFlags.Ephemeral
+      });
     }
 
     const inputKey = interaction.fields.getTextInputValue("key").trim();
+
     if (account.key !== inputKey) {
-      return interaction.reply({ content: "Invalid key.", flags: MessageFlags.Ephemeral });
-    }
-    const requestedScript = action === "main" ? "main" : "mobile";
-    if (!account.allowedScripts.includes(requestedScript)) {
-      return interaction.reply({ content: "No access.", flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: "Invalid key.",
+        flags: MessageFlags.Ephemeral
+      });
     }
 
-    const loader = createLuaTemplate(username, inputKey, requestedScript, requestedScript === "main" ? "Jamari Main" : "Jamari Mobile");
-    return interaction.reply({ content: "```lua\n" + loader + "```", flags: MessageFlags.Ephemeral });
+    const requestedScript = action === "main" ? "main" : "mobile";
+
+    if (!account.allowedScripts.includes(requestedScript)) {
+      return interaction.reply({
+        content: "No access.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    const loader = createLuaTemplate(
+      username,
+      inputKey,
+      requestedScript,
+      requestedScript === "main" ? "Jamari Main" : "Jamari Mobile"
+    );
+
+    return interaction.reply({
+      content: "```lua\n" + loader + "```",
+      flags: MessageFlags.Ephemeral
+    });
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -647,12 +785,14 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.commandName === "accounts") {
       const accountName = findAccountByDiscordId(db, interaction.user.id);
+
       if (!accountName || !db[accountName]) {
         return interaction.reply({
           content: "You do not have a linked JJSTUDIOS account yet.",
           flags: MessageFlags.Ephemeral
         });
       }
+
       return interaction.reply({
         embeds: [createCustomerProfileEmbed(interaction.user, db[accountName])],
         components: createCustomerProfileComponents(),
@@ -666,31 +806,50 @@ client.on("interactionCreate", async (interaction) => {
 
     if (subcommand === "panel") {
       if (!hasAccess(await getMemberRoles(interaction.user.id), USERINFO_ROLES)) {
-        return interaction.reply({ content: "**No Access**", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "**No Access**",
+          flags: MessageFlags.Ephemeral
+        });
       }
+
       return interaction.reply(createPanel());
     }
 
     if (subcommand === "setpanel") {
       if (!hasAccess(await getMemberRoles(interaction.user.id), USERINFO_ROLES)) {
-        return interaction.reply({ content: "**No Access**", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "**No Access**",
+          flags: MessageFlags.Ephemeral
+        });
       }
 
       const targetChannel = interaction.options.getChannel("channel");
+
       if (!targetChannel || typeof targetChannel.send !== "function") {
-        return interaction.reply({ content: "Please select a valid text channel.", flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: "Please select a valid text channel.",
+          flags: MessageFlags.Ephemeral
+        });
       }
 
       await targetChannel.send(createPanel());
-      return interaction.reply({ content: "Panel sent to " + targetChannel.toString() + ".", flags: MessageFlags.Ephemeral });
+
+      return interaction.reply({
+        content: "Panel sent to " + targetChannel.toString() + ".",
+        flags: MessageFlags.Ephemeral
+      });
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const currentMember = await getMemberRoles(interaction.user.id);
-    if (!currentMember) return interaction.editReply({ content: "Not In Server" });
 
-    if (["showuserinfo", "accounts", "revoke"].includes(subcommand) && !hasAccess(currentMember, USERINFO_ROLES)) {
+    if (!currentMember) {
+      return interaction.editReply({ content: "Not In Server" });
+    }
+
+    if (["showuserinfo", "accounts", "revoke"].includes(subcommand) &&
+        !hasAccess(currentMember, USERINFO_ROLES)) {
       return interaction.editReply({ content: "**No Access**" });
     }
 
@@ -701,56 +860,103 @@ client.on("interactionCreate", async (interaction) => {
     function checkCredentials(customUser, customPass) {
       if (customUser === undefined) customUser = targetUser;
       if (customPass === undefined) customPass = inputPass;
-      if (!customUser) { interaction.editReply({ content: "Account not found." }).catch(() => {}); return false; }
-      if (customUser.password !== customPass) { interaction.editReply({ content: "Incorrect password" }).catch(() => {}); return false; }
-      if (customUser.status === "disabled") { interaction.editReply({ content: "This account is banned" }).catch(() => {}); return false; }
+
+      if (!customUser) {
+        interaction.editReply({ content: "Account not found." }).catch(() => {});
+        return false;
+      }
+
+      if (customUser.password !== customPass) {
+        interaction.editReply({ content: "Incorrect password" }).catch(() => {});
+        return false;
+      }
+
+      if (customUser.status === "disabled") {
+        interaction.editReply({ content: "This account is banned" }).catch(() => {});
+        return false;
+      }
+
       return true;
     }
 
     if (subcommand === "accountstatus") {
       if (!checkCredentials()) return;
+
       const keyCreatedAt = targetUser.keyCreatedAt || now();
-      const left = Math.max(0, Math.ceil((KEY_LIFETIME - (now() - keyCreatedAt)) / (1000 * 60 * 60 * 24)));
+      const left = Math.max(
+        0,
+        Math.ceil((KEY_LIFETIME - (now() - keyCreatedAt)) / (1000 * 60 * 60 * 24))
+      );
+
       return interaction.editReply({
-        content: "### Account Check: [" + inputUser + "]\n• **Status:** `" + targetUser.status + "`\n• **Device Lock:** `" + (targetUser.hwid ? "Locked" : "Open") + "`\n• **Expires On:** " + formatDate(keyCreatedAt + KEY_LIFETIME) + "\n• **Days Left:** " + left + " day(s)",
-        flags: MessageFlags.Ephemeral
+        content:
+          "### Account Check: [" + inputUser + "]\n" +
+          "• **Status:** `" + targetUser.status + "`\n" +
+          "• **Device Lock:** `" + (targetUser.hwid ? "Locked" : "Open") + "`\n" +
+          "• **Expires On:** " + formatDate(keyCreatedAt + KEY_LIFETIME) + "\n" +
+          "• **Days Left:** " + left + " day(s)"
       });
     }
 
     if (subcommand === "changepassword") {
       const oldPass = interaction.options.getString("old_password");
+
       if (!checkCredentials(targetUser, oldPass)) return;
+
       db[inputUser].password = interaction.options.getString("new_password");
       writeDB(db);
+
       return interaction.editReply({ content: "Password changed" });
     }
 
     if (subcommand === "showuserinfo") {
       const lookupUsername = interaction.options.getString("lookup")?.trim().toLowerCase();
-      if (!lookupUsername) return interaction.editReply({ content: "Please enter a username!" });
-      if (lookupUsername === "__meta" || !db[lookupUsername]) return interaction.editReply({ content: "Account not found." });
+
+      if (!lookupUsername) {
+        return interaction.editReply({ content: "Please enter a username!" });
+      }
+
+      if (lookupUsername === "__meta" || !db[lookupUsername]) {
+        return interaction.editReply({ content: "Account not found." });
+      }
+
       const account = db[lookupUsername];
+
       return interaction.editReply({
-        content: "**User Info — `" + lookupUsername + "`**\n• **Username:** `" + lookupUsername + "`\n• **Password:** `" + account.password + "`\n• **Key:** `" + account.key + "`\n• **Scripts:** `" + (account.allowedScripts || []).join(", ") + "`\n• **Status:** `" + (account.status || "active") + "`",
+        content:
+          "**User Info — `" + lookupUsername + "`**\n" +
+          "• **Username:** `" + lookupUsername + "`\n" +
+          "• **Password:** `" + account.password + "`\n" +
+          "• **Key:** `" + account.key + "`\n" +
+          "• **Scripts:** `" + (account.allowedScripts || []).join(", ") + "`\n" +
+          "• **Status:** `" + (account.status || "active") + "`",
         flags: MessageFlags.Ephemeral
       });
     }
 
     if (subcommand === "accounts") {
       const accountList = getAccountKeys(db);
-      if (accountList.length === 0) return interaction.editReply({ content: "No accounts found in the database." });
+
+      if (accountList.length === 0) {
+        return interaction.editReply({ content: "No accounts found in the database." });
+      }
+
       const lines = accountList.map((x) => {
         const acct = db[x];
         const status = acct.status || "active";
         const locked = acct.hwid ? "Locked" : "Open";
         const scripts = (acct.allowedScripts || []).join(", ");
-        return "• **" + x + "** — Status: `" + status + "` — Device: `" + locked + "` — Scripts: `" + scripts + "`";
+
+        return "• **" + x + "** — Status: `" + status +
+          "` — Device: `" + locked + "` — Scripts: `" + scripts + "`";
       });
 
       let current = "";
       const chunks = [];
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
+
         if ((current + "\n" + line).length > 3900) {
           chunks.push(current);
           current = line;
@@ -758,39 +964,66 @@ client.on("interactionCreate", async (interaction) => {
           current = current ? current + "\n" + line : line;
         }
       }
+
       if (current) chunks.push(current);
 
       if (chunks.length === 1) {
-        return interaction.editReply({ content: "**Registered Accounts (" + accountList.length + ")**\n" + chunks[0] });
+        return interaction.editReply({
+          content: "**Registered Accounts (" + accountList.length + ")**\n" + chunks[0]
+        });
       }
 
-      await interaction.editReply({ content: "Found " + accountList.length + " accounts (split across " + chunks.length + " messages):" });
+      await interaction.editReply({
+        content: "Found " + accountList.length +
+          " accounts (split across " + chunks.length + " messages):"
+      });
+
       for (let i = 0; i < chunks.length; i++) {
-        await interaction.followUp({ content: "**(" + (i + 1) + "/" + chunks.length + ")**\n" + chunks[i], flags: MessageFlags.Ephemeral });
+        await interaction.followUp({
+          content: "**(" + (i + 1) + "/" + chunks.length + ")**\n" + chunks[i],
+          flags: MessageFlags.Ephemeral
+        });
       }
+
       return;
     }
 
     if (subcommand === "revoke") {
       const discordUser = interaction.options.getUser("user");
-      if (!discordUser) return interaction.editReply({ content: "Provide a Discord user to revoke." });
+
+      if (!discordUser) {
+        return interaction.editReply({ content: "Provide a Discord user to revoke." });
+      }
+
       const accountName = findAccountByDiscordId(db, discordUser.id);
+
       if (accountName && db[accountName]) {
         db[accountName].status = "disabled";
         db[accountName].allowedScripts = [];
         writeDB(db);
       }
-      return interaction.editReply({ content: "**Access revoked**\n• **Discord:** " + discordUser.username + "\n• **Loader account:** " + (accountName ? "`" + accountName + "` (disabled)" : "[none]") });
+
+      return interaction.editReply({
+        content:
+          "**Access revoked**\n" +
+          "• **Discord:** " + discordUser.username + "\n" +
+          "• **Loader account:** " +
+          (accountName ? "`" + accountName + "` (disabled)" : "[none]")
+      });
     }
 
     return interaction.editReply({ content: "Unknown command." });
   } catch (err) {
     console.error("[CRASH SHIELD] Intercepted interaction fault:", err);
+
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({ content: "Something went wrong. Check the bot logs." });
       } else {
-        await interaction.reply({ content: "Something went wrong. Check the bot logs.", flags: MessageFlags.Ephemeral });
+        await interaction.reply({
+          content: "Something went wrong. Check the bot logs.",
+          flags: MessageFlags.Ephemeral
+        });
       }
     } catch (_) {}
   }
@@ -799,11 +1032,20 @@ client.on("interactionCreate", async (interaction) => {
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   try {
     const db = readDB();
-    const linkedAccountName = getAccountKeys(db).find((name) => db[name] && String(db[name].discordId) === String(newMember.id));
+
+    const linkedAccountName = getAccountKeys(db).find(
+      (name) => db[name] && String(db[name].discordId) === String(newMember.id)
+    );
+
     if (!linkedAccountName) return;
+
     const oldRoles = oldMember.roles.cache;
     const newRoles = newMember.roles.cache;
-    if (oldRoles.size === newRoles.size && [...oldRoles.keys()].every((key) => newRoles.has(key))) return;
+
+    if (oldRoles.size === newRoles.size &&
+        [...oldRoles.keys()].every((key) => newRoles.has(key))) {
+      return;
+    }
 
     const allowedScripts = getGrantedScriptsForMember(newMember);
     db[linkedAccountName].allowedScripts = allowedScripts;
@@ -814,16 +1056,26 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 });
 
 function buildCommands() {
-  const builder = new SlashCommandBuilder().setName("jamari").setDescription("Loader commands");
+  const builder = new SlashCommandBuilder()
+    .setName("jamari")
+    .setDescription("Loader commands");
 
   try {
     if (typeof InteractionContextType !== "undefined") {
-      builder.setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel);
+      builder.setContexts(
+        InteractionContextType.Guild,
+        InteractionContextType.BotDM,
+        InteractionContextType.PrivateChannel
+      );
     } else {
       builder.setContexts(0, 1, 2);
     }
+
     if (typeof ApplicationIntegrationType !== "undefined") {
-      builder.setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall);
+      builder.setIntegrationTypes(
+        ApplicationIntegrationType.GuildInstall,
+        ApplicationIntegrationType.UserInstall
+      );
     } else {
       builder.setIntegrationTypes(0, 1);
     }
@@ -832,18 +1084,64 @@ function buildCommands() {
   }
 
   builder
-    .addSubcommand((sub) => sub.setName("panel").setDescription("Open the Jamari scripts panel"))
-    .addSubcommand((sub) => sub.setName("setpanel").setDescription("Send the panel to a selected channel").addChannelOption((o) => o.setName("channel").setDescription("The channel to send the panel to").setRequired(true)))
-    .addSubcommand((sub) => sub.setName("accountstatus").setDescription("Check your account status").addStringOption((o) => o.setName("username").setDescription("Your loader username").setRequired(true)).addStringOption((o) => o.setName("password").setDescription("Your loader password").setRequired(true)))
-    .addSubcommand((sub) => sub.setName("changepassword").setDescription("Change your password").addStringOption((o) => o.setName("username").setDescription("Your loader username").setRequired(true)).addStringOption((o) => o.setName("old_password").setDescription("Current password").setRequired(true)).addStringOption((o) => o.setName("new_password").setDescription("New password").setRequired(true)))
-    .addSubcommand((sub) => sub.setName("showuserinfo").setDescription("View any account's username, password and key").addStringOption((o) => o.setName("lookup").setDescription("The username to inspect").setRequired(true)))
-    .addSubcommand((sub) => sub.setName("accounts").setDescription("List all registered accounts"))
-    .addSubcommand((sub) => sub.setName("revoke").setDescription("Revoke access").addUserOption((o) => o.setName("user").setDescription("Discord user to revoke").setRequired(true)));
+    .addSubcommand((sub) =>
+      sub.setName("panel").setDescription("Open the Jamari scripts panel")
+    )
+    .addSubcommand((sub) =>
+      sub.setName("setpanel")
+        .setDescription("Send the panel to a selected channel")
+        .addChannelOption((o) =>
+          o.setName("channel")
+            .setDescription("The channel to send the panel to")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("accountstatus")
+        .setDescription("Check your account status")
+        .addStringOption((o) =>
+          o.setName("username").setDescription("Your loader username").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("password").setDescription("Your loader password").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("changepassword")
+        .setDescription("Change your password")
+        .addStringOption((o) =>
+          o.setName("username").setDescription("Your loader username").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("old_password").setDescription("Current password").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("new_password").setDescription("New password").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("showuserinfo")
+        .setDescription("View any account's username, password and key")
+        .addStringOption((o) =>
+          o.setName("lookup").setDescription("The username to inspect").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("accounts").setDescription("List all registered accounts")
+    )
+    .addSubcommand((sub) =>
+      sub.setName("revoke")
+        .setDescription("Revoke access")
+        .addUserOption((o) =>
+          o.setName("user").setDescription("Discord user to revoke").setRequired(true)
+        )
+    );
 
   const json = builder.toJSON();
   json.dm_permission = true;
   json.contexts = [0, 1, 2];
   json.integration_types = [0, 1];
+
   const accountsCommand = new SlashCommandBuilder()
     .setName("accounts")
     .setDescription("View your JJSTUDIOS customer profile")
@@ -854,9 +1152,8 @@ function buildCommands() {
 
 const commandLayouts = buildCommands();
 
-// JJSTUDIOS Ticket Bot - Secure Accounts API
-// This endpoint exposes only usernames, account status, and allowed script names.
-// It never returns passwords, keys, HWIDs, Discord IDs, or account records.
+// Secure Accounts API.
+// Exposes only usernames, account status, and allowed script names.
 app.get("/api/accounts", (req, res) => {
   const secret = process.env.ACCOUNTS_API_SECRET;
   const providedSecret = req.get("x-api-secret");
@@ -870,6 +1167,7 @@ app.get("/api/accounts", (req, res) => {
 
   try {
     const db = readDB();
+
     const accounts = getAccountKeys(db).map((username) => {
       const account = db[username] && typeof db[username] === "object"
         ? db[username]
@@ -885,9 +1183,11 @@ app.get("/api/accounts", (req, res) => {
     });
 
     res.set("Cache-Control", "no-store");
+
     return res.json({ success: true, accounts });
   } catch (error) {
     console.error("[ACCOUNTS API ERROR]", error);
+
     return res.status(500).json({
       success: false,
       message: "Unable to retrieve accounts"
@@ -900,17 +1200,24 @@ app.listen(PORT, () => {
 });
 
 const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000;
+
 function startKeepAlive() {
   const urlStr = process.env.RENDER_EXTERNAL_URL || "http://localhost:" + PORT;
   const mod = urlStr.startsWith("https") ? https : http;
+
   setInterval(() => {
     mod.get(urlStr, { timeout: 5000 }, (res) => {
       let d = "";
+
       res.on("data", (c) => d += c);
+
       res.on("end", () => {
         try {
           const j = JSON.parse(d);
-          if (j.status === "ok") console.log("[KEEP-ALIVE] Ping successful — " + new Date().toLocaleTimeString());
+
+          if (j.status === "ok") {
+            console.log("[KEEP-ALIVE] Ping successful — " + new Date().toLocaleTimeString());
+          }
         } catch (_) {}
       });
     }).on("error", (err) => {
@@ -918,31 +1225,59 @@ function startKeepAlive() {
     });
   }, KEEP_ALIVE_INTERVAL);
 }
+
 startKeepAlive();
 
 client.on("messageCreate", async (message) => {
   try {
     if (message.author.bot || message.guild) return;
+
     const content = (message.content || "").trim();
-    if (!content.toLowerCase().startsWith("/jamari") && !content.toLowerCase().startsWith("!jamari")) return;
+
+    if (!content.toLowerCase().startsWith("/jamari") &&
+        !content.toLowerCase().startsWith("!jamari")) {
+      return;
+    }
 
     const db = readDB();
     const parts = content.split(/\s+/);
     const sub = (parts[1] || "").toLowerCase();
 
     if (!sub || sub === "help") {
-      return message.reply("**Jamari DM commands**\n`!jamari accountstatus <username> <password>`\n`!jamari changepassword <username> <oldpass> <newpass>`\n`!jamari key <username> <password>`");
+      return message.reply(
+        "**Jamari DM commands**\n" +
+        "`!jamari accountstatus <username> <password>`\n" +
+        "`!jamari changepassword <username> <oldpass> <newpass>`\n" +
+        "`!jamari key <username> <password>`"
+      );
     }
 
     if (sub === "accountstatus") {
       const username = (parts[2] || "").toLowerCase();
       const password = parts[3];
       const account = db[username];
-      if (!account || account.password !== password) return message.reply("Account not found or incorrect password");
-      if (account.status === "disabled") return message.reply("This account is banned");
+
+      if (!account || account.password !== password) {
+        return message.reply("Account not found or incorrect password");
+      }
+
+      if (account.status === "disabled") {
+        return message.reply("This account is banned");
+      }
+
       const keyCreatedAt = account.keyCreatedAt || now();
-      const left = Math.max(0, Math.ceil((KEY_LIFETIME - (now() - keyCreatedAt)) / (1000 * 60 * 60 * 24)));
-      return message.reply("### Account Check: [" + username + "]\n• **Status:** `" + account.status + "`\n• **Device Lock:** `" + (account.hwid ? "Locked" : "Open") + "`\n• **Expires On:** " + formatDate(keyCreatedAt + KEY_LIFETIME) + "\n• **Days Left:** " + left + " day(s)");
+      const left = Math.max(
+        0,
+        Math.ceil((KEY_LIFETIME - (now() - keyCreatedAt)) / (1000 * 60 * 60 * 24))
+      );
+
+      return message.reply(
+        "### Account Check: [" + username + "]\n" +
+        "• **Status:** `" + account.status + "`\n" +
+        "• **Device Lock:** `" + (account.hwid ? "Locked" : "Open") + "`\n" +
+        "• **Expires On:** " + formatDate(keyCreatedAt + KEY_LIFETIME) + "\n" +
+        "• **Days Left:** " + left + " day(s)"
+      );
     }
 
     if (sub === "changepassword") {
@@ -950,11 +1285,22 @@ client.on("messageCreate", async (message) => {
       const oldPass = parts[3];
       const newPass = parts[4];
       const account = db[username];
-      if (!account || account.password !== oldPass) return message.reply("Account not found or incorrect password");
-      if (account.status === "disabled") return message.reply("This account is banned");
-      if (!newPass) return message.reply("Usage: `!jamari changepassword <username> <oldpass> <newpass>`");
+
+      if (!account || account.password !== oldPass) {
+        return message.reply("Account not found or incorrect password");
+      }
+
+      if (account.status === "disabled") {
+        return message.reply("This account is banned");
+      }
+
+      if (!newPass) {
+        return message.reply("Usage: `!jamari changepassword <username> <oldpass> <newpass>`");
+      }
+
       account.password = newPass;
       writeDB(db);
+
       return message.reply("Password changed");
     }
 
@@ -962,24 +1308,34 @@ client.on("messageCreate", async (message) => {
       const username = (parts[2] || "").toLowerCase();
       const password = parts[3];
       const account = db[username];
-      if (!account || account.password !== password) return message.reply("Account not found or incorrect password");
-      if (account.status === "disabled") return message.reply("This account is banned");
+
+      if (!account || account.password !== password) {
+        return message.reply("Account not found or incorrect password");
+      }
+
+      if (account.status === "disabled") {
+        return message.reply("This account is banned");
+      }
+
       return message.reply("Your key is: `" + account.key + "`");
     }
 
     return message.reply("Unknown subcommand. Type `!jamari help`");
   } catch (err) {
     console.error("[DM MESSAGE CMD ERROR]", err);
-    try { await message.reply("Something went wrong."); } catch (_) {}
+
+    try {
+      await message.reply("Something went wrong.");
+    } catch (_) {}
   }
 });
 
-// Send each account owner a private reminder before their access expires.
-// A reminder is recorded only after Discord accepts the DM, preventing repeats.
+// Account expiration reminders.
 let expirationNoticeCheckRunning = false;
 
 async function checkAccountExpirationNotices() {
   if (expirationNoticeCheckRunning || !client.isReady()) return;
+
   expirationNoticeCheckRunning = true;
 
   try {
@@ -989,13 +1345,16 @@ async function checkAccountExpirationNotices() {
 
     for (const username of getAccountKeys(db)) {
       const account = db[username];
+
       if (!account || account.status === "disabled" || !account.discordId) continue;
 
       const createdAt = Number(account.keyCreatedAt);
+
       if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
 
       const expiresAt = createdAt + KEY_LIFETIME;
       const timeRemaining = expiresAt - currentTime;
+
       if (timeRemaining <= 0) continue;
 
       if (!account.expirationNotices || typeof account.expirationNotices !== "object") {
@@ -1005,8 +1364,6 @@ async function checkAccountExpirationNotices() {
       let noticeKey = null;
       let noticeLabel = null;
 
-      // If the bot was offline and both reminder windows passed, send only
-      // the more urgent 15-hour reminder rather than two messages at once.
       if (timeRemaining <= EXPIRATION_NOTICE_15_HOURS) {
         if (!account.expirationNotices.fifteenHoursSentAt) {
           noticeKey = "fifteenHoursSentAt";
@@ -1023,8 +1380,15 @@ async function checkAccountExpirationNotices() {
 
       try {
         const user = await client.users.fetch(String(account.discordId));
-        const productNames = (Array.isArray(account.allowedScripts) ? account.allowedScripts : [])
-          .map((script) => script === "main" ? "Upgraded Main" : script === "mobile" ? "Mobile" : String(script))
+
+        const productNames = (
+          Array.isArray(account.allowedScripts) ? account.allowedScripts : []
+        )
+          .map((script) =>
+            script === "main" ? "Upgraded Main" :
+            script === "mobile" ? "Mobile" :
+            String(script)
+          )
           .join(", ") || "No active products";
 
         const reminderEmbed = new EmbedBuilder()
@@ -1038,19 +1402,30 @@ async function checkAccountExpirationNotices() {
           .addFields(
             {
               name: "Expires",
-              value: "<t:" + Math.floor(expiresAt / 1000) + ":F> · <t:" + Math.floor(expiresAt / 1000) + ":R>",
+              value:
+                "<t:" + Math.floor(expiresAt / 1000) + ":F> · " +
+                "<t:" + Math.floor(expiresAt / 1000) + ":R>",
               inline: false
             },
-            { name: "Products", value: productNames.slice(0, 1024), inline: false }
+            {
+              name: "Products",
+              value: productNames.slice(0, 1024),
+              inline: false
+            }
           )
           .setFooter({ text: "JJSTUDIOS" });
 
         await user.send({ embeds: [reminderEmbed] });
+
         account.expirationNotices[noticeKey] = currentTime;
         databaseChanged = true;
+
         console.log("[EXPIRATION NOTICE] Sent " + noticeLabel + " to account " + username);
       } catch (dmError) {
-        console.error("[EXPIRATION NOTICE] Could not DM account " + username + ":", dmError.message);
+        console.error(
+          "[EXPIRATION NOTICE] Could not DM account " + username + ":",
+          dmError.message
+        );
       }
     }
 
@@ -1064,27 +1439,43 @@ async function checkAccountExpirationNotices() {
 
 client.once("ready", async () => {
   console.log("[Bot Online] Logged into Discord as " + client.user.tag);
+
   checkAccountExpirationNotices();
   setInterval(checkAccountExpirationNotices, EXPIRATION_NOTICE_CHECK_INTERVAL);
+
   const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
 
   try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+      body: []
+    });
+
     console.log("[CMDS] Cleared guild commands.");
   } catch (err) {
     console.error("[CMDS] Could not clear guild commands:", err.message);
   }
 
   try {
-    const globalCmds = await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandLayouts });
+    const globalCmds = await rest.put(
+      Routes.applicationCommands(CLIENT_ID),
+      { body: commandLayouts }
+    );
+
     console.log("[CMDS] Global commands registered: " + globalCmds.length);
   } catch (err) {
     console.error("[CMDS] Global register FAILED:", err.message);
-    if (err.rawError) console.error(JSON.stringify(err.rawError, null, 2));
+
+    if (err.rawError) {
+      console.error(JSON.stringify(err.rawError, null, 2));
+    }
   }
 });
 
-console.log("[LOGIN] Starting Discord login... (token length=" + String(BOT_TOKEN || "").length + ")");
+console.log(
+  "[LOGIN] Starting Discord login... (token length=" +
+  String(BOT_TOKEN || "").length + ")"
+);
+
 if (!BOT_TOKEN || String(BOT_TOKEN).length < 50) {
   console.error("[LOGIN] BOT_TOKEN looks invalid or too short.");
 }
@@ -1093,5 +1484,8 @@ client.login(BOT_TOKEN).then(() => {
   console.log("[LOGIN] client.login() resolved (waiting for ready event)...");
 }).catch((err) => {
   console.error("[LOGIN FAILED]", err && err.message ? err.message : err);
-  if (err && err.code) console.error("[LOGIN FAILED] code:", err.code);
+
+  if (err && err.code) {
+    console.error("[LOGIN FAILED] code:", err.code);
+  }
 });
