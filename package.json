@@ -1,14 +1,14 @@
 {
-“name”: “jamari”,
-“description”: “JJSTUDIOS Account System”,
-“version”: “1.0.0”,
-“main”: “server.js”,
-“scripts”: {
-“start”: “node server.js”
-},
-“dependencies”: {
-“discord.js”: “^14.18.0”,
-“express”: “^4.21.0”,
-“dotenv”: “^16.4.7”
-}
+  "name": "jamari",
+  "description": "JJSTUDIOS Account System",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "express": "^4.21.0",
+    "dotenv": "^16.4.7"
+  }
 }
