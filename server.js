@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const {
   Client,
   GatewayIntentBits,
@@ -18,9 +20,14 @@ const {
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const http = require("http");
 const https = require("https");
+
+// =====================================================
+// JJSTUDIOS ACCOUNT SYSTEM
+// =====================================================
 
 const app = express();
 app.use(express.json());
@@ -42,18 +49,22 @@ const USERINFO_ROLES = [
   FULL_COMMAND_ACCESS_ROLE
 ];
 
-const RESET_COOLDOWN = 1000 * 60 * 15;
-const KEY_LIFETIME = 1000 * 60 * 60 * 24 * 30;
+const RESET_COOLDOWN = 15 * 60 * 1000;
+const KEY_LIFETIME = 30 * 24 * 60 * 60 * 1000;
 
 const ACCOUNT_CREATED_LOG_CHANNEL_ID = "1572100117605912597";
 const SCRIPT_EXECUTION_LOG_CHANNEL_ID = "1572100117605912597";
 
-const EXPIRATION_NOTICE_3_DAYS = 1000 * 60 * 60 * 24 * 3;
-const EXPIRATION_NOTICE_15_HOURS = 1000 * 60 * 60 * 15;
+const EXPIRATION_NOTICE_3_DAYS = 3 * 24 * 60 * 60 * 1000;
+const EXPIRATION_NOTICE_15_HOURS = 15 * 60 * 60 * 1000;
 const EXPIRATION_NOTICE_CHECK_INTERVAL = 5 * 60 * 1000;
 
+const PINK = 0xF2A9D4;
+
 const DB_BASE = (() => {
-  if (process.env.RENDER_DISK_PATH) return process.env.RENDER_DISK_PATH;
+  if (process.env.RENDER_DISK_PATH) {
+    return process.env.RENDER_DISK_PATH;
+  }
 
   try {
     fs.accessSync("/var/data", fs.constants.W_OK);
@@ -67,56 +78,8 @@ const DB_PATH = path.join(DB_BASE, "database.json");
 
 const SCRIPTS = {};
 
-const scriptFiles = [
-  ["mobile.lua", "mobile"],
-  ["main.lua", "main"]
-];
-
-for (const [fileName, scriptKey] of scriptFiles) {
-  const scriptPath = path.join(__dirname, "scripts", fileName);
-
-  try {
-    if (fs.existsSync(scriptPath)) {
-      const script = fs.readFileSync(scriptPath, "utf8");
-      SCRIPTS[scriptKey] = script;
-
-      console.log(
-        "[SCRIPTS] Loaded scripts/" +
-        fileName +
-        " (" +
-        script.length +
-        " bytes)"
-      );
-    } else {
-      SCRIPTS[scriptKey] = "print('" + scriptKey + " script missing')";
-
-      console.error(
-        "[SCRIPTS] " +
-        fileName +
-        " not found at: " +
-        scriptPath
-      );
-    }
-  } catch (e) {
-    SCRIPTS[scriptKey] = "print('" + scriptKey + " script failed to load')";
-
-    console.error(
-      "[SCRIPTS] Error loading " + fileName + ":",
-      e.message
-    );
-  }
-}
-
-process.on("unhandledRejection", (reason) => {
-  console.error("[CRASH SHIELD] Unhandled Rejection:", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("[CRASH SHIELD] Uncaught Exception:", err);
-});
-
 if (!BOT_TOKEN || !CLIENT_ID) {
-  console.error("[STARTUP ERROR] Critical environment variables missing.");
+  console.error("[STARTUP] BOT_TOKEN or CLIENT_ID is missing.");
   process.exit(1);
 }
 
@@ -130,50 +93,122 @@ const client = new Client({
   ]
 });
 
-client.on("error", (err) => {
-  console.error("[DISCORD CLIENT ERROR]", err);
+client.on("error", (error) => {
+  console.error("[DISCORD ERROR]", error);
 });
 
-// ---------------- GENERAL HELPERS ----------------
+process.on("unhandledRejection", (error) => {
+  console.error("[UNHANDLED REJECTION]", error);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[UNCAUGHT EXCEPTION]", error);
+});
+
+// =====================================================
+// SCRIPT FILES
+// =====================================================
+
+for (const [fileName, scriptName] of [
+  ["mobile.lua", "mobile"],
+  ["main.lua", "main"]
+]) {
+  const scriptPath = path.join(__dirname, "scripts", fileName);
+
+  try {
+    if (!fs.existsSync(scriptPath)) {
+      throw new Error("Script file does not exist.");
+    }
+
+    SCRIPTS[scriptName] = fs.readFileSync(scriptPath, "utf8");
+
+    console.log(
+      `[SCRIPTS] Loaded ${fileName} (${SCRIPTS[scriptName].length} bytes)`
+    );
+  } catch (error) {
+    SCRIPTS[scriptName] = null;
+    console.error(`[SCRIPTS] Could not load ${fileName}:`, error.message);
+  }
+}
+
+// =====================================================
+// GENERAL HELPERS
+// =====================================================
 
 function now() {
   return Date.now();
 }
 
-function generateKey() {
-  const a = Math.random().toString(36).substring(2, 6).toUpperCase();
-  const b = Math.random().toString(36).substring(2, 10).toUpperCase();
-  const c = Math.random().toString(36).substring(2, 4).toUpperCase();
-
-  return "JAMARI-" + a + "-" + b + "-" + c;
+function formatDate(timestamp) {
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric"
+  });
 }
 
-function formatDate(ms) {
-  const d = new Date(ms);
+function safeString(value) {
+  if (typeof value !== "string") return null;
+  return value.trim().toLowerCase();
+}
 
-  const months = [
-    "January", "February", "March", "April",
-    "May", "June", "July", "August",
-    "September", "October", "November", "December"
-  ];
-
+function generateKey() {
   return (
-    months[d.getMonth()] +
-    " " +
-    d.getDate() +
-    ", " +
-    d.getFullYear()
+    "JAMARI-" +
+    crypto.randomBytes(2).toString("hex").toUpperCase() +
+    "-" +
+    crypto.randomBytes(4).toString("hex").toUpperCase() +
+    "-" +
+    crypto.randomBytes(1).toString("hex").toUpperCase()
   );
 }
 
-// ---------------- DATABASE ----------------
+function generatePassword() {
+  return crypto.randomBytes(12).toString("base64url");
+}
+
+function getProductNames(products) {
+  const names = [];
+
+  if (products.includes("mobile")) names.push("Mobile");
+  if (products.includes("main")) names.push("Main");
+
+  return names.length ? names.join(", ") : "No products";
+}
+
+function getExpiration(account) {
+  const createdAt = Number(account.keyCreatedAt);
+
+  if (!Number.isFinite(createdAt) || createdAt <= 0) {
+    return null;
+  }
+
+  return createdAt + KEY_LIFETIME;
+}
+
+function isExpired(account) {
+  const expiration = getExpiration(account);
+  return !expiration || now() >= expiration;
+}
+
+function getAccountKeys(db) {
+  return Object.keys(db).filter((key) => key !== "__meta");
+}
+
+function findAccountByDiscordId(db, discordId) {
+  return getAccountKeys(db).find((username) => {
+    return String(db[username]?.discordId) === String(discordId);
+  }) || null;
+}
+
+// =====================================================
+// DATABASE
+// =====================================================
 
 function readDB() {
   try {
-    const dir = path.dirname(DB_PATH);
-
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(DB_BASE)) {
+      fs.mkdirSync(DB_BASE, { recursive: true });
     }
 
     if (!fs.existsSync(DB_PATH)) {
@@ -181,133 +216,216 @@ function readDB() {
       return {};
     }
 
-    return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-  } catch (e) {
-    console.error("[DATABASE ENGINE CORRUPTION] Auto-repairing sync...", e);
+    const parsed = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
 
-    try {
-      fs.writeFileSync(DB_PATH, "{}", "utf8");
-    } catch (_) {}
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Invalid database structure.");
+    }
 
+    return parsed;
+  } catch (error) {
+    console.error("[DATABASE ERROR]", error);
+
+    // Do not overwrite a potentially recoverable database automatically.
     return {};
   }
 }
 
 function writeDB(db) {
   try {
-    const dir = path.dirname(DB_PATH);
-
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(DB_BASE)) {
+      fs.mkdirSync(DB_BASE, { recursive: true });
     }
 
+    const temporaryPath = DB_PATH + ".tmp";
+
     fs.writeFileSync(
-      DB_PATH,
+      temporaryPath,
       JSON.stringify(db, null, 2),
       "utf8"
     );
-  } catch (e) {
-    console.error("[DATABASE FILE WRITE FAULT]", e);
+
+    fs.renameSync(temporaryPath, DB_PATH);
+    return true;
+  } catch (error) {
+    console.error("[DATABASE WRITE ERROR]", error);
+    return false;
   }
 }
 
-function safeString(v) {
-  if (typeof v !== "string") return null;
-  return v.trim().toLowerCase();
-}
-
-function getAccountKeys(db) {
-  return Object.keys(db).filter((k) => k !== "__meta");
-}
-
-function findAccountByDiscordId(db, discordId) {
-  const id = String(discordId);
-
-  for (const name of getAccountKeys(db)) {
-    if (db[name] && String(db[name].discordId) === id) {
-      return name;
-    }
-  }
-
-  return null;
-}
-
-// ---------------- ROLE HELPERS ----------------
+// =====================================================
+// DISCORD ROLE HELPERS
+// =====================================================
 
 async function getMemberRoles(userId) {
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
 
-    if (!guild) return null;
-
-    const member = await guild.members.fetch({
+    return await guild.members.fetch({
       user: userId,
       force: true
     });
-
-    return member || null;
-  } catch (err) {
-    console.log(
-      "[MEMBER FETCH] Could not fetch member " +
-      userId +
-      ": " +
-      err.message
-    );
-
+  } catch (error) {
+    console.error("[MEMBER FETCH]", error.message);
     return null;
   }
 }
 
 function hasAnyRole(member, roleIds) {
-  if (!member || !roleIds || roleIds.length === 0) {
-    return false;
-  }
+  if (!member || !member.roles) return false;
 
-  return roleIds.some((roleId) =>
-    member.roles.cache.has(roleId)
+  return roleIds.some((roleId) => member.roles.cache.has(roleId));
+}
+
+function hasAccess(member, roleIds = []) {
+  if (!member) return false;
+
+  return (
+    hasAnyRole(member, [ADMIN_ROLE, FULL_COMMAND_ACCESS_ROLE]) ||
+    hasAnyRole(member, roleIds)
   );
 }
 
-function hasAccess(member, requiredRoleIds) {
-  if (!member) return false;
-
-  if (hasAnyRole(member, [
-    ADMIN_ROLE,
-    FULL_COMMAND_ACCESS_ROLE
-  ])) {
-    return true;
-  }
-
-  return hasAnyRole(member, requiredRoleIds || []);
+function isStaff(member) {
+  return hasAccess(member, USERINFO_ROLES);
 }
 
 function getGrantedScriptsForMember(member) {
-  const grantedScripts = [];
+  const products = [];
 
   if (hasAccess(member, [MOBILE_MAIN_ROLE])) {
-    grantedScripts.push("mobile");
+    products.push("mobile");
   }
 
   if (hasAccess(member, [MAIN_ACCESS_ROLE])) {
-    grantedScripts.push("main");
+    products.push("main");
   }
 
-  return grantedScripts;
+  return products;
 }
 
-function getPanelAccessMessage(action) {
-  if (action === "main") {
-    return "You need the Main role to use the Main button.";
+async function setProductRoles(member, products) {
+  const shouldHaveMobile = products.includes("mobile");
+  const shouldHaveMain = products.includes("main");
+
+  if (shouldHaveMobile) {
+    await member.roles.add(MOBILE_MAIN_ROLE);
+  } else {
+    await member.roles.remove(MOBILE_MAIN_ROLE);
   }
 
-  if (action === "mobilemain") {
-    return "You need the Mobile Main role to use the Mobile button.";
+  if (shouldHaveMain) {
+    await member.roles.add(MAIN_ACCESS_ROLE);
+  } else {
+    await member.roles.remove(MAIN_ACCESS_ROLE);
   }
-
-  return "You need access to use this button.";
 }
 
-// ---------------- SCRIPT EXECUTION LOGS ----------------
+// =====================================================
+// DM NOTIFICATIONS
+// =====================================================
+
+async function sendAccountDM(discordId, embed) {
+  if (!discordId) {
+    return { sent: false, reason: "No linked Discord account." };
+  }
+
+  try {
+    const user = await client.users.fetch(String(discordId));
+    await user.send({ embeds: [embed] });
+
+    return { sent: true };
+  } catch (error) {
+    console.error("[ACCOUNT DM ERROR]", error.message);
+
+    return {
+      sent: false,
+      reason: "The user may have DMs disabled."
+    };
+  }
+}
+
+function createNotificationEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(PINK)
+    .setAuthor({ name: "JJSTUDIOS" })
+    .setTitle(title)
+    .setDescription(description)
+    .setFooter({ text: "JJSTUDIOS · Account Notifications" })
+    .setTimestamp();
+}
+
+function createRevokedEmbed(account, staffUser) {
+  const products = getProductNames(
+    Array.isArray(account.allowedScripts) ? account.allowedScripts : []
+  );
+
+  return createNotificationEmbed(
+    "Access Revoked",
+    "Your JJSTUDIOS access has been revoked.\n\n" +
+    "Your account and script access are no longer available."
+  ).addFields(
+    {
+      name: "Products",
+      value: products,
+      inline: true
+    },
+    {
+      name: "Revoked By",
+      value: `${staffUser} (${staffUser.username})`,
+      inline: false
+    },
+    {
+      name: "Revoked At",
+      value: `<t:${Math.floor(now() / 1000)}:F>`,
+      inline: false
+    }
+  );
+}
+
+function createHwidResetEmbed(account) {
+  return createNotificationEmbed(
+    "HWID Reset",
+    "Your device lock has been reset successfully.\n\n" +
+    "Your next supported loader authentication will register the device again."
+  ).addFields(
+    {
+      name: "Account",
+      value: "`" + String(account.username || "Your account") + "`",
+      inline: true
+    },
+    {
+      name: "Products",
+      value: getProductNames(account.allowedScripts || []),
+      inline: true
+    },
+    {
+      name: "Reset Time",
+      value: `<t:${Math.floor(now() / 1000)}:F>`,
+      inline: false
+    }
+  );
+}
+
+// =====================================================
+// ACCOUNT LOGS
+// =====================================================
+
+async function sendAccountLog(embed) {
+  try {
+    const channel = await client.channels.fetch(
+      ACCOUNT_CREATED_LOG_CHANNEL_ID
+    );
+
+    if (!channel?.isTextBased() || !channel.send) {
+      throw new Error("Account log channel is unavailable.");
+    }
+
+    await channel.send({ embeds: [embed] });
+  } catch (error) {
+    console.error("[ACCOUNT LOG ERROR]", error.message);
+  }
+}
 
 async function sendScriptExecutionLog(
   username,
@@ -316,41 +434,20 @@ async function sendScriptExecutionLog(
   executorName
 ) {
   try {
-    if (!client.isReady()) return;
-
-    const logChannel = await client.channels.fetch(
+    const channel = await client.channels.fetch(
       SCRIPT_EXECUTION_LOG_CHANNEL_ID
     );
 
-    if (
-      !logChannel ||
-      !logChannel.isTextBased() ||
-      typeof logChannel.send !== "function"
-    ) {
-      throw new Error(
-        "Script execution log channel is unavailable or is not a text channel."
-      );
-    }
+    if (!channel?.isTextBased() || !channel.send) return;
 
-    const discordValue = discordId
-      ? "<@" + String(discordId) + ">"
-      : "Not linked";
-
-    const safeExecutor =
-      typeof executorName === "string" && executorName.trim()
-        ? executorName.trim().slice(0, 100)
-        : "Unknown";
-
-    const executionEmbed = new EmbedBuilder()
-      .setColor(0xF2A9D4)
+    const embed = new EmbedBuilder()
+      .setColor(PINK)
       .setTitle("LOADER AUTHENTICATED")
-      .setDescription(
-        "A loader request passed account authentication and the script was returned."
-      )
+      .setDescription("A loader request passed account authentication.")
       .addFields(
         {
           name: "Account",
-          value: "`" + String(username).slice(0, 100) + "`",
+          value: "`" + username + "`",
           inline: true
         },
         {
@@ -360,64 +457,53 @@ async function sendScriptExecutionLog(
         },
         {
           name: "Executor",
-          value: "`" + safeExecutor.replace(/`/g, "'") + "`",
+          value: "`" + String(executorName || "Unknown").slice(0, 100) + "`",
           inline: true
         },
         {
           name: "Discord User",
-          value: discordValue,
+          value: discordId ? `<@${discordId}>` : "Not linked",
           inline: true
         },
         {
-          name: "Status",
-          value: "Authenticated · Script delivered",
-          inline: false
-        },
-        {
           name: "Time",
-          value: "<t:" + Math.floor(Date.now() / 1000) + ":F>",
+          value: `<t:${Math.floor(now() / 1000)}:F>`,
           inline: false
         }
       )
-      .setFooter({
-        text: "JJSTUDIOS · Execution Logs"
-      })
+      .setFooter({ text: "JJSTUDIOS · Execution Logs" })
       .setTimestamp();
 
-    await logChannel.send({
-      embeds: [executionEmbed],
+    await channel.send({
+      embeds: [embed],
       allowedMentions: { parse: [] }
     });
-  } catch (logError) {
-    console.error("[SCRIPT EXECUTION LOG ERROR]", logError);
+  } catch (error) {
+    console.error("[EXECUTION LOG ERROR]", error.message);
   }
 }
 
-// ---------------- LOADER API ----------------
+// =====================================================
+// LOADER API
+// =====================================================
 
 function createLoadHandler(scriptName) {
   return async (req, res) => {
     try {
       const db = readDB();
 
-      if (db.__meta && db.__meta.maintenanceMode) {
+      if (db.__meta?.maintenanceMode) {
         return res.json({
           success: false,
-          reason: "**Bot was shut down**"
+          reason: "The service is currently unavailable."
         });
       }
 
-      const {
-        username,
-        key,
-        hwid,
-        executor
-      } = req.body;
-
-      const cleanUser = safeString(username);
+      const { username, key, hwid, executor } = req.body || {};
+      const cleanUsername = safeString(username);
 
       if (
-        !cleanUser ||
+        !cleanUsername ||
         typeof key !== "string" ||
         !key.trim() ||
         typeof hwid !== "string" ||
@@ -425,75 +511,78 @@ function createLoadHandler(scriptName) {
       ) {
         return res.status(400).json({
           success: false,
-          reason: "Username, key, and HWID are required"
+          reason: "Username, key, and HWID are required."
         });
       }
 
-      const user = db[cleanUser];
+      const account = db[cleanUsername];
 
-      if (!user) {
+      if (!account) {
         return res.json({
           success: false,
-          reason: "Account not found"
+          reason: "Account not found."
         });
       }
 
-      if (user.status === "disabled") {
+      if (account.status !== "active") {
         return res.json({
           success: false,
-          reason: "Your account is banned"
+          reason: "Your account is disabled."
         });
       }
 
-      if (user.key !== key.trim()) {
+      if (account.key !== key.trim()) {
         return res.json({
           success: false,
-          reason: "Invalid Key"
+          reason: "Invalid key."
         });
       }
 
-      const keyCreatedAt = Number(user.keyCreatedAt);
-
-      if (
-        !Number.isFinite(keyCreatedAt) ||
-        now() - keyCreatedAt >= KEY_LIFETIME
-      ) {
+      if (isExpired(account)) {
         return res.json({
           success: false,
-          reason: "Your key has expired"
+          reason: "Your key has expired."
         });
       }
 
       if (
-        !user.allowedScripts ||
-        !user.allowedScripts.includes(scriptName)
+        !Array.isArray(account.allowedScripts) ||
+        !account.allowedScripts.includes(scriptName)
       ) {
         return res.json({
           success: false,
-          reason: "**No Access**"
+          reason: "No access."
         });
       }
 
       const cleanHwid = hwid.trim();
 
-      if (!user.hwid) {
-        user.hwid = cleanHwid;
-        user.hwidLockedAt = now();
-      } else if (user.hwid !== cleanHwid) {
+      if (!account.hwid) {
+        account.hwid = cleanHwid;
+        account.hwidLockedAt = now();
+      } else if (account.hwid !== cleanHwid) {
         return res.json({
           success: false,
-          reason: "HWID mismatch"
+          reason: "HWID mismatch."
         });
       }
 
-      writeDB(db);
+      account.executions = (Number(account.executions) || 0) + 1;
+      account.lastExecutionAt = now();
+
+      if (!writeDB(db)) {
+        return res.status(500).json({
+          success: false,
+          reason: "Unable to update account."
+        });
+      }
 
       const scriptCode = SCRIPTS[scriptName];
 
       if (!scriptCode) {
         return res.json({
           success: false,
-          reason: "Script content missing on server files."
+          reason: "Script file is unavailable."
         });
       }
 
@@ -511,25 +600,22 @@ function createLoadHandler(scriptName) {
       ].join("\n");
 
       void sendScriptExecutionLog(
-        cleanUser,
+        cleanUsername,
         scriptName,
-        user.discordId,
+        account.discordId,
         executor
       );
 
       return res.json({
         success: true,
-        chunk: finalScript.trim()
+        chunk: finalScript
       });
-    } catch (err) {
-      console.error(
-        "[API PROCESS FAILURE] Web execution loop error:",
-        err
-      );
+    } catch (error) {
+      console.error("[LOADER ERROR]", error);
 
       return res.status(500).json({
         success: false,
-        reason: "Something went wrong. Please try again."
+        reason: "Something went wrong."
       });
     }
   };
@@ -538,26 +624,29 @@ function createLoadHandler(scriptName) {
 app.post("/load/main", createLoadHandler("main"));
 app.post("/load/mobile", createLoadHandler("mobile"));
 
-// ---------------- HEALTH CHECK ----------------
-
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "ok",
-    scriptsLoaded: Object.keys(SCRIPTS).length
+    system: "JJSTUDIOS Account System",
+    scriptsLoaded: Object.keys(SCRIPTS).filter(
+      (name) => Boolean(SCRIPTS[name])
+    )
   });
 });
 
-// ---------------- LUA LOADER TEMPLATE ----------------
+// =====================================================
+// LUA LOADER TEMPLATE
+// =====================================================
 
-function createLuaTemplate(u, k, endpoint, displayName) {
+function createLuaTemplate(username, key, endpoint, displayName) {
   const domain = process.env.RENDER_EXTERNAL_URL
     ? process.env.RENDER_EXTERNAL_URL.replace(/^https?:\/\//, "")
     : (process.env.DOMAIN || "localhost:3000");
 
   return [
     `-- ${displayName} : -- /jamari Loader`,
-    `local USERNAME = "${u}"`,
-    `local KEY = "${k}"`,
+    `local USERNAME = "${username}"`,
+    `local KEY = "${key}"`,
     `local HWID = game:GetService("RbxAnalyticsService"):GetClientId()`,
     `local HttpService = game:GetService("HttpService")`,
     "",
@@ -586,83 +675,26 @@ function createLuaTemplate(u, k, endpoint, displayName) {
     "  })",
     "end)",
     "",
-    "if not ok then error('[ /YZeqZghAA ] Could not reach server: ' .. tostring(response)) end",
-    "",
+    "if not ok then error('Could not reach the JJSTUDIOS server: ' .. tostring(response)) end",
     "local data = HttpService:JSONDecode(response.Body)",
     "if not data.success then",
-    "  if data.reason == 'HWID mismatch' then",
-    "    game:GetService('Players').LocalPlayer:Kick('Wrong device detected. Visit https://discord.gg/YZeqZghAA to reset your HWID.')",
-    "  end",
-    "  error('[ /YZeqZghAA ] ' .. (data.reason or 'Unknown error'))",
+    "  error(data.reason or 'Unknown error')",
     "end",
-    "",
     "loadstring(data.chunk)()"
   ].join("\n");
 }
 
-// ---------------- CUSTOMER PROFILE HELPERS ----------------
+// =====================================================
+// CUSTOMER PROFILE
+// =====================================================
 
 function createCustomerProfileEmbed(user, account) {
-  const tickets = Array.isArray(account.tickets)
-    ? account.tickets
-    : [];
-
-  const openTickets = tickets.filter((ticket) =>
-    ["open", "pending", "in_progress"].includes(
-      String(ticket.status || "").toLowerCase()
-    )
-  ).length;
-
-  const moderationHistory = Array.isArray(account.moderationHistory)
-    ? account.moderationHistory
-    : [];
-
-  const hwidResetHistory = Array.isArray(account.hwidResetHistory)
-    ? account.hwidResetHistory
-    : [];
-
-  const staffNotes = Array.isArray(account.staffNotes)
-    ? account.staffNotes
-    : [];
-
-  const flags = Array.isArray(account.flags)
-    ? account.flags
-    : [];
-
-  const coreSince =
-    account.createdAt ||
-    account.keyCreatedAt ||
-    Date.now();
-
-  const keyState =
-    account.status === "disabled"
-      ? "Disabled"
-      : (account.key ? "Active" : "Not synced");
-
-  const hwidState = account.hwid ? "Locked" : "Unknown";
-
-  const latestKeyRequest = account.latestKeyRequest
-    ? String(account.latestKeyRequest)
-    : "None";
-
-  const recentTickets = tickets.length
-    ? tickets.slice(-3).reverse().map((ticket) => {
-        const label =
-          ticket.subject ||
-          ticket.title ||
-          ("Ticket #" + (ticket.id || "—"));
-
-        return (
-          "• " +
-          String(label).slice(0, 80) +
-          " — " +
-          String(ticket.status || "Open")
-        );
-      }).join("\n")
-    : "None";
+  const tickets = Array.isArray(account.tickets) ? account.tickets : [];
+  const products = getProductNames(account.allowedScripts || []);
+  const expiration = getExpiration(account);
 
   return new EmbedBuilder()
-    .setColor(0xF2A9D4)
+    .setColor(PINK)
     .setAuthor({
       name: "JJSTUDIOS",
       iconURL: user.displayAvatarURL({ size: 128 })
@@ -672,17 +704,17 @@ function createCustomerProfileEmbed(user, account) {
     .addFields(
       {
         name: "Products",
-        value: "No synced products yet.",
+        value: products,
         inline: false
       },
       {
-        name: "Key State",
-        value: keyState,
+        name: "Account Status",
+        value: account.status || "active",
         inline: true
       },
       {
         name: "HWID",
-        value: hwidState,
+        value: account.hwid ? "Locked" : "Open",
         inline: true
       },
       {
@@ -692,48 +724,23 @@ function createCustomerProfileEmbed(user, account) {
       },
       {
         name: "Tickets",
-        value: openTickets + " open · " + tickets.length + " total",
+        value: String(tickets.length),
         inline: true
       },
       {
-        name: "Moderation",
-        value: moderationHistory.length + " record(s)",
+        name: "Created",
+        value: `<t:${Math.floor((account.createdAt || account.keyCreatedAt || now()) / 1000)}:f>`,
         inline: true
       },
       {
-        name: "HWID Reset History",
-        value: hwidResetHistory.length + " request(s)",
-        inline: true
-      },
-      {
-        name: "Staff Notes",
-        value: staffNotes.length + " note(s)",
-        inline: true
-      },
-      {
-        name: "Flags",
-        value: flags.length ? flags.join(", ").slice(0, 1000) : "None",
-        inline: true
-      },
-      {
-        name: "Core Customer Since",
-        value: "<t:" + Math.floor(Number(coreSince) / 1000) + ":f>",
-        inline: true
-      },
-      {
-        name: "Latest Key Request",
-        value: latestKeyRequest.slice(0, 1000),
-        inline: false
-      },
-      {
-        name: "Recent Tickets",
-        value: recentTickets.slice(0, 1000),
+        name: "Expires",
+        value: expiration
+          ? `<t:${Math.floor(expiration / 1000)}:F>`
+          : "Unavailable",
         inline: false
       }
     )
-    .setFooter({
-      text: "JJSTUDIOS · Core"
-    });
+    .setFooter({ text: "JJSTUDIOS · Customer Panel" });
 }
 
 function createCustomerProfileComponents() {
@@ -759,7 +766,6 @@ function createCustomerProfileComponents() {
         .setLabel("My Tickets")
         .setStyle(ButtonStyle.Secondary)
     ),
-
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("jj_accounts_notifications")
@@ -774,53 +780,53 @@ function createCustomerProfileComponents() {
   ];
 }
 
-// ---------------- MAIN PANEL ----------------
+// =====================================================
+// MAIN CUSTOMER PANEL
+// =====================================================
 
 function createPanel() {
   const embed = new EmbedBuilder()
     .setColor(0xEAF4FF)
-    .setTitle("☁️ ୨୧ jamari script panel୨୧ ☁️")
+    .setTitle("☁️ ୨୧ jamari script panel ୨୧ ☁️")
     .setDescription(
       "˚₊‧꒰ა Welcome to the heavenly control panel ໒꒱‧₊˚\n\n" +
       "Register an account\n" +
-      " Get your key\n" +
+      "Get your key\n" +
       "Main loader\n" +
-      " Mobile loader\n" +
+      "Mobile loader\n" +
       "Reset HWID\n\n" +
       "˚₊‧ May your day be full of sunshine and stardust ‧₊˚"
     )
     .addFields({
-      name: " Available Actions",
-      value: "Register  ·  Get Key  ·  Main  ·  Mobile  ·  Reset HWID"
+      name: "Available Actions",
+      value: "Register · Get Key · Main · Mobile · Reset HWID"
     })
-    .setFooter({
-      text: "Made with love and a little stardust "
-    });
+    .setFooter({ text: "JJSTUDIOS" });
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("jc_register")
-      .setLabel(" Register")
+      .setLabel("Register")
       .setStyle(ButtonStyle.Primary),
 
     new ButtonBuilder()
       .setCustomId("jc_key")
-      .setLabel(" Get Key")
+      .setLabel("Get Key")
       .setStyle(ButtonStyle.Success),
 
     new ButtonBuilder()
       .setCustomId("jc_main")
-      .setLabel(" Main")
+      .setLabel("Main")
       .setStyle(ButtonStyle.Primary),
 
     new ButtonBuilder()
       .setCustomId("jc_mobilemain")
-      .setLabel(" Mobile")
+      .setLabel("Mobile")
       .setStyle(ButtonStyle.Secondary),
 
     new ButtonBuilder()
       .setCustomId("jc_resethwid")
-      .setLabel(" Reset HWID")
+      .setLabel("Reset HWID")
       .setStyle(ButtonStyle.Danger)
   );
 
@@ -830,19 +836,18 @@ function createPanel() {
   };
 }
 
-// ---------------- PANEL MODALS ----------------
-
 function createPanelModal(action) {
-  const title =
-    action === "register" ? "Register" :
-    action === "key" ? "Get Key" :
-    action === "main" ? "Main Loader" :
-    action === "mobilemain" ? "Mobile Loader" :
-    "Reset HWID";
+  const titles = {
+    register: "Register",
+    key: "Get Key",
+    main: "Main Loader",
+    mobilemain: "Mobile Loader",
+    resethwid: "Reset HWID"
+  };
 
   const modal = new ModalBuilder()
     .setCustomId("jc_modal_" + action)
-    .setTitle(title);
+    .setTitle(titles[action] || "JJSTUDIOS");
 
   modal.addComponents(
     new ActionRowBuilder().addComponents(
@@ -852,7 +857,6 @@ function createPanelModal(action) {
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
     ),
-
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId("password")
@@ -877,125 +881,1017 @@ function createPanelModal(action) {
   return modal;
 }
 
-// ---------------- INTERACTION HANDLER ----------------
+// =====================================================
+// SLASH COMMAND BUILDERS
+// =====================================================
 
-client.on("interactionCreate", async (interaction) => {
-  if (
-    !interaction.isChatInputCommand() &&
-    !interaction.isButton() &&
-    !interaction.isModalSubmit()
-  ) {
-    return;
+function applyCommandContexts(builder) {
+  builder.setContexts(
+    InteractionContextType.Guild,
+    InteractionContextType.BotDM,
+    InteractionContextType.PrivateChannel
+  );
+
+  builder.setIntegrationTypes(
+    ApplicationIntegrationType.GuildInstall,
+    ApplicationIntegrationType.UserInstall
+  );
+
+  return builder;
+}
+
+function buildJamariCommand() {
+  const builder = applyCommandContexts(
+    new SlashCommandBuilder()
+      .setName("jamari")
+      .setDescription("Legacy loader commands")
+  );
+
+  builder
+    .addSubcommand((sub) =>
+      sub.setName("panel").setDescription("Open the customer panel")
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("setpanel")
+        .setDescription("Send the customer panel to a channel")
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("Target channel")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("accountstatus")
+        .setDescription("Check an account")
+        .addStringOption((option) =>
+          option.setName("username").setDescription("Username").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("password").setDescription("Password").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("changepassword")
+        .setDescription("Change an account password")
+        .addStringOption((option) =>
+          option.setName("username").setDescription("Username").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("old_password").setDescription("Current password").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("new_password").setDescription("New password").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("showuserinfo")
+        .setDescription("View account information without credentials")
+        .addStringOption((option) =>
+          option.setName("lookup").setDescription("Username").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("accounts").setDescription("List registered accounts")
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("revoke")
+        .setDescription("Disable an account")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Discord user").setRequired(true)
+        )
+    );
+
+  return builder.toJSON();
+}
+
+function buildJJStudiosCommand() {
+  const builder = applyCommandContexts(
+    new SlashCommandBuilder()
+      .setName("jjstudios")
+      .setDescription("JJSTUDIOS account management")
+  );
+
+  const productOption = (option) =>
+    option
+      .setName("products")
+      .setDescription("Products to assign")
+      .setRequired(true)
+      .addChoices(
+        { name: "Mobile", value: "mobile" },
+        { name: "Main", value: "main" },
+        { name: "Both", value: "both" }
+      );
+
+  builder
+    .addSubcommand((sub) =>
+      sub.setName("account").setDescription("View your linked account")
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("scripts")
+        .setDescription("Get your available loader script")
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("grant")
+        .setDescription("Create a new buyer account")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Buyer").setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName("username").setDescription("New username").setRequired(true)
+        )
+        .addStringOption(productOption)
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("revoke")
+        .setDescription("Delete an account and revoke its access")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Buyer").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("disable")
+        .setDescription("Temporarily disable an account")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Buyer").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("enable")
+        .setDescription("Enable an account")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Buyer").setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("editproducts")
+        .setDescription("Change a buyer's products")
+        .addUserOption((option) =>
+          option.setName("user").setDescription("Buyer").setRequired(true)
+        )
+        .addStringOption(productOption)
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("lookup")
+        .setDescription("Look up an account without showing credentials")
+        .addStringOption((option) =>
+          option
+            .setName("username")
+            .setDescription("Account username")
+            .setRequired(false)
+        )
+        .addUserOption((option) =>
+          option
+            .setName("user")
+            .setDescription("Linked Discord user")
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("adminpanel")
+        .setDescription("Post the JJSTUDIOS staff command panel")
+        .addChannelOption((option) =>
+          option
+            .setName("channel")
+            .setDescription("Channel for the staff panel")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("apicheck")
+        .setDescription("Check the account system status")
+    );
+
+  return builder.toJSON();
+}
+
+const commandLayouts = [
+  buildJamariCommand(),
+  buildJJStudiosCommand()
+];
+
+// =====================================================
+// STAFF COMMAND HELPERS
+// =====================================================
+
+async function requireStaff(interaction) {
+  const member = await getMemberRoles(interaction.user.id);
+
+  if (!isStaff(member)) {
+    await interaction.editReply({
+      content: "You do not have permission to use this command."
+    });
+
+    return null;
   }
 
-  const member = interaction.guildId
-    ? await getMemberRoles(interaction.user.id)
-    : null;
+  return member;
+}
 
-  if (interaction.isButton()) {
-    if (interaction.customId.startsWith("jj_accounts_")) {
-      const db = readDB();
+function getProductsFromChoice(choice) {
+  if (choice === "both") return ["mobile", "main"];
+  if (choice === "mobile") return ["mobile"];
+  if (choice === "main") return ["main"];
 
-      const accountName = findAccountByDiscordId(
-        db,
-        interaction.user.id
+  return [];
+}
+
+function createAccountRecord(username, password, discordId, products) {
+  const createdAt = now();
+
+  return {
+    username,
+    password,
+    key: generateKey(),
+    hwid: null,
+    hwidLockedAt: null,
+    lastHwidReset: 0,
+    status: "active",
+    allowedScripts: products,
+    discordId: String(discordId),
+    keyCreatedAt: createdAt,
+    createdAt,
+    executions: 0,
+    tickets: [],
+    moderationHistory: [],
+    hwidResetHistory: [],
+    staffNotes: [],
+    flags: [],
+    expirationNotices: {}
+  };
+}
+
+function createGrantDM(username, account) {
+  const expiresAt = getExpiration(account);
+
+  return new EmbedBuilder()
+    .setColor(PINK)
+    .setAuthor({ name: "JJSTUDIOS" })
+    .setTitle("Your JJSTUDIOS Account")
+    .setDescription(
+      "Your account has been created successfully!\n\n" +
+      "Keep your login information private."
+    )
+    .addFields(
+      {
+        name: "Username",
+        value: "`" + username + "`",
+        inline: true
+      },
+      {
+        name: "Password",
+        value: "`" + account.password + "`",
+        inline: true
+      },
+      {
+        name: "Key",
+        value: "`" + account.key + "`",
+        inline: false
+      },
+      {
+        name: "Products",
+        value: getProductNames(account.allowedScripts),
+        inline: true
+      },
+      {
+        name: "Expires",
+        value: expiresAt ? `<t:${Math.floor(expiresAt / 1000)}:F>` : "Unavailable",
+        inline: false
+      }
+    )
+    .setFooter({ text: "JJSTUDIOS · Keep these details private" })
+    .setTimestamp();
+}
+
+function createStaffPanelEmbed() {
+  return new EmbedBuilder()
+    .setColor(PINK)
+    .setTitle("JJSTUDIOS Account System")
+    .setDescription(
+      "Staff command reference.\n\n" +
+      "**Account Management**\n" +
+      "`/jjstudios grant` — Create a buyer account\n" +
+      "`/jjstudios revoke` — Delete an account and revoke access\n" +
+      "`/jjstudios disable` — Temporarily disable an account\n" +
+      "`/jjstudios enable` — Re-enable an account\n" +
+      "`/jjstudios editproducts` — Change buyer products\n" +
+      "`/jjstudios lookup` — View account information\n\n" +
+      "**System Tools**\n" +
+      "`/jjstudios apicheck` — Check system health\n" +
+      "`/jjstudios adminpanel` — Post this panel\n\n" +
+      "**Buyer Commands**\n" +
+      "`/jjstudios account` — View your account\n" +
+      "`/jjstudios scripts` — Get your loader"
+    )
+    .setFooter({ text: "JJSTUDIOS · Staff Panel" })
+    .setTimestamp();
+}
+
+function createAccountInfoEmbed(username, account) {
+  const expiration = getExpiration(account);
+
+  return new EmbedBuilder()
+    .setColor(PINK)
+    .setTitle("Account Lookup")
+    .addFields(
+      {
+        name: "Username",
+        value: "`" + username + "`",
+        inline: true
+      },
+      {
+        name: "Discord User",
+        value: account.discordId ? `<@${account.discordId}>` : "Not linked",
+        inline: true
+      },
+      {
+        name: "Status",
+        value: account.status || "active",
+        inline: true
+      },
+      {
+        name: "Products",
+        value: getProductNames(account.allowedScripts || []),
+        inline: true
+      },
+      {
+        name: "HWID",
+        value: account.hwid ? "Locked" : "Open",
+        inline: true
+      },
+      {
+        name: "Executions",
+        value: String(Number(account.executions) || 0),
+        inline: true
+      },
+      {
+        name: "Expiration",
+        value: expiration ? `<t:${Math.floor(expiration / 1000)}:F>` : "Unavailable",
+        inline: false
+      }
+    )
+    .setFooter({ text: "JJSTUDIOS · Private Staff Lookup" })
+    .setTimestamp();
+}
+
+// =====================================================
+// JJSTUDIOS COMMAND HANDLER
+// =====================================================
+
+async function handleJJStudiosCommand(interaction) {
+  const subcommand = interaction.options.getSubcommand();
+  const db = readDB();
+
+  // Customer: own account
+  if (subcommand === "account") {
+    const username = findAccountByDiscordId(db, interaction.user.id);
+
+    if (!username) {
+      return interaction.editReply({
+        content: "You do not have a linked JJSTUDIOS account."
+      });
+    }
+
+    const account = db[username];
+
+    return interaction.editReply({
+      embeds: [createAccountInfoEmbed(username, account)]
+    });
+  }
+
+  // Customer: get their own loader
+  if (subcommand === "scripts") {
+    const username = findAccountByDiscordId(db, interaction.user.id);
+
+    if (!username) {
+      return interaction.editReply({
+        content: "You do not have a linked JJSTUDIOS account."
+      });
+    }
+
+    const account = db[username];
+
+    if (account.status !== "active" || isExpired(account)) {
+      return interaction.editReply({
+        content: "Your account is disabled or expired."
+      });
+    }
+
+    const products = Array.isArray(account.allowedScripts)
+      ? account.allowedScripts
+      : [];
+
+    if (!products.length) {
+      return interaction.editReply({
+        content: "Your account does not have any active products."
+      });
+    }
+
+    const messages = [];
+
+    for (const product of products) {
+      if (!SCRIPTS[product]) continue;
+
+      const loader = createLuaTemplate(
+        username,
+        account.key,
+        product,
+        product === "main" ? "JJSTUDIOS Main" : "JJSTUDIOS Mobile"
       );
 
-      if (!accountName || !db[accountName]) {
-        return interaction.reply({
-          content: "You do not have a linked JJSTUDIOS account yet.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
+      messages.push({
+        name: product === "main" ? "Main Loader" : "Mobile Loader",
+        value: loader
+      });
+    }
 
-      const account = db[accountName];
+    if (!messages.length) {
+      return interaction.editReply({
+        content: "Your script files are currently unavailable."
+      });
+    }
 
-      const profileAction = interaction.customId.slice(
-        "jj_accounts_".length
-      );
+    await interaction.editReply({
+      content: "Your available loader script(s):"
+    });
 
-      if (profileAction === "refresh") {
-        return interaction.update({
-          embeds: [
-            createCustomerProfileEmbed(interaction.user, account)
-          ],
-          components: createCustomerProfileComponents()
-        });
-      }
-
-      if (profileAction === "reset") {
-        const lastReset = Number(account.lastHwidReset) || 0;
-
-        if (now() - lastReset < RESET_COOLDOWN) {
-          const minutesLeft = Math.ceil(
-            (RESET_COOLDOWN - (now() - lastReset)) / 60000
-          );
-
-          return interaction.reply({
-            content:
-              "Your HWID reset cooldown is active. Try again in " +
-              minutesLeft +
-              " minute(s).",
-            flags: MessageFlags.Ephemeral
-          });
-        }
-
-        account.hwid = null;
-        account.lastHwidReset = now();
-
-        if (!Array.isArray(account.hwidResetHistory)) {
-          account.hwidResetHistory = [];
-        }
-
-        account.hwidResetHistory.push({
-          requestedAt: now(),
-          discordId: interaction.user.id
-        });
-
-        writeDB(db);
-
-        return interaction.update({
-          embeds: [
-            createCustomerProfileEmbed(interaction.user, account)
-          ],
-          components: createCustomerProfileComponents()
-        });
-      }
-
-      const messages = {
-        issues: "Known issues are not published yet. Please check back later.",
-        updates: "There are no published JJSTUDIOS updates yet.",
-        tickets:
-          "You have " +
-          (Array.isArray(account.tickets) ? account.tickets.length : 0) +
-          " ticket(s) on your account.",
-        notifications:
-          "Notification preferences are not configured yet."
-      };
-
-      return interaction.reply({
-        content:
-          messages[profileAction] ||
-          "This profile action is not available.",
+    for (const item of messages) {
+      await interaction.followUp({
+        content: `**${item.name}**\n\`\`\`lua\n${item.value.slice(0, 1800)}\n\`\`\``,
         flags: MessageFlags.Ephemeral
       });
     }
 
-    const action = interaction.customId.slice(3);
+    return;
+  }
 
-    const validActions = [
-      "register",
-      "key",
-      "main",
-      "mobilemain",
-      "resethwid"
-    ];
+  // All remaining commands are staff-only.
+  const staffMember = await requireStaff(interaction);
+  if (!staffMember) return;
 
-    if (
-      interaction.customId.startsWith("jc_") &&
-      validActions.includes(action)
-    ) {
-      const buttonRoleMap = {
+  // Grant: create account
+  if (subcommand === "grant") {
+    const targetUser = interaction.options.getUser("user");
+    const username = safeString(interaction.options.getString("username"));
+    const products = getProductsFromChoice(
+      interaction.options.getString("products")
+    );
+
+    if (!username || username === "__meta") {
+      return interaction.editReply({
+        content: "That username is not valid."
+      });
+    }
+
+    if (db[username]) {
+      return interaction.editReply({
+        content: "That username is already taken."
+      });
+    }
+
+    if (findAccountByDiscordId(db, targetUser.id)) {
+      return interaction.editReply({
+        content: "That Discord user already has a linked account."
+      });
+    }
+
+    let targetMember;
+
+    try {
+      targetMember = await interaction.guild.members.fetch(targetUser.id);
+    } catch {
+      return interaction.editReply({
+        content: "That user must be a member of this server before you can grant access."
+      });
+    }
+
+    const password = generatePassword();
+    const account = createAccountRecord(
+      username,
+      password,
+      targetUser.id,
+      products
+    );
+
+    db[username] = account;
+
+    if (!writeDB(db)) {
+      delete db[username];
+
+      return interaction.editReply({
+        content: "The account could not be saved. Check the database."
+      });
+    }
+
+    try {
+      await setProductRoles(targetMember, products);
+    } catch (error) {
+      console.error("[GRANT ROLE ERROR]", error);
+    }
+
+    const dmResult = await sendAccountDM(
+      targetUser.id,
+      createGrantDM(username, account)
+    );
+
+    await sendAccountLog(
+      new EmbedBuilder()
+        .setColor(PINK)
+        .setTitle("ACCOUNT GRANTED")
+        .setDescription("A staff member created a new buyer account.")
+        .addFields(
+          { name: "Username", value: "`" + username + "`", inline: true },
+          { name: "Buyer", value: targetUser.toString(), inline: true },
+          { name: "Products", value: getProductNames(products), inline: true },
+          { name: "Granted By", value: interaction.user.toString(), inline: true },
+          { name: "DM", value: dmResult.sent ? "Delivered" : "Not delivered", inline: true }
+        )
+        .setTimestamp()
+    );
+
+    return interaction.editReply({
+      content:
+        `Account created for ${targetUser}.\n` +
+        `**Username:** \`${username}\`\n` +
+        `**Products:** ${getProductNames(products)}\n` +
+        `**Buyer DM:** ${dmResult.sent ? "Sent" : "Could not be delivered"}\n\n` +
+        "The password and key were sent privately to the buyer."
+    });
+  }
+
+  // Revoke: remove account completely
+  if (subcommand === "revoke") {
+    const targetUser = interaction.options.getUser("user");
+    const username = findAccountByDiscordId(db, targetUser.id);
+
+    if (!username || !db[username]) {
+      return interaction.editReply({
+        content: "No linked account was found for that user."
+      });
+    }
+
+    const account = db[username];
+
+    const revokedEmbed = createRevokedEmbed(account, interaction.user);
+
+    let targetMember = null;
+
+    try {
+      targetMember = await interaction.guild.members.fetch(targetUser.id);
+    } catch {}
+
+    if (targetMember) {
+      try {
+        await targetMember.roles.remove([
+          MAIN_ACCESS_ROLE,
+          MOBILE_MAIN_ROLE
+        ]);
+      } catch (error) {
+        console.error("[REVOKE ROLE ERROR]", error);
+      }
+    }
+
+    delete db[username];
+
+    if (!writeDB(db)) {
+      db[username] = account;
+
+      return interaction.editReply({
+        content: "The account could not be deleted from the database."
+      });
+    }
+
+    const dmResult = await sendAccountDM(targetUser.id, revokedEmbed);
+
+    await sendAccountLog(
+      new EmbedBuilder()
+        .setColor(PINK)
+        .setTitle("ACCOUNT REVOKED")
+        .setDescription("A buyer account was deleted.")
+        .addFields(
+          { name: "Username", value: "`" + username + "`", inline: true },
+          { name: "Buyer", value: targetUser.toString(), inline: true },
+          { name: "Revoked By", value: interaction.user.toString(), inline: true },
+          { name: "Products", value: getProductNames(account.allowedScripts || []), inline: true },
+          { name: "Buyer DM", value: dmResult.sent ? "Sent" : "Not delivered", inline: true }
+        )
+        .setTimestamp()
+    );
+
+    return interaction.editReply({
+      content:
+        `Access revoked for ${targetUser}.\n` +
+        `**Account:** \`${username}\`\n` +
+        "**Account deleted:** Yes\n" +
+        "**Product roles removed:** Yes\n" +
+        `**Revocation DM:** ${dmResult.sent ? "Sent" : "Could not be delivered"}`
+    });
+  }
+
+  // Disable: keep account but block access
+  if (subcommand === "disable") {
+    const targetUser = interaction.options.getUser("user");
+    const username = findAccountByDiscordId(db, targetUser.id);
+
+    if (!username) {
+      return interaction.editReply({
+        content: "No linked account was found."
+      });
+    }
+
+    db[username].status = "disabled";
+    db[username].moderationHistory ||= [];
+
+    db[username].moderationHistory.push({
+      action: "disabled",
+      by: interaction.user.id,
+      at: now()
+    });
+
+    if (!writeDB(db)) {
+      return interaction.editReply({
+        content: "Could not save the account change."
+      });
+    }
+
+    const embed = createNotificationEmbed(
+      "Account Disabled",
+      "Your JJSTUDIOS account has been disabled by staff."
+    ).addFields(
+      { name: "Disabled By", value: interaction.user.toString(), inline: true },
+      { name: "Time", value: `<t:${Math.floor(now() / 1000)}:F>`, inline: true }
+    );
+
+    const dmResult = await sendAccountDM(targetUser.id, embed);
+
+    return interaction.editReply({
+      content: `Disabled ${targetUser}'s account. Buyer DM: ${dmResult.sent ? "Sent" : "Not delivered"}.`
+    });
+  }
+
+  // Enable: restore account
+  if (subcommand === "enable") {
+    const targetUser = interaction.options.getUser("user");
+    const username = findAccountByDiscordId(db, targetUser.id);
+
+    if (!username) {
+      return interaction.editReply({
+        content: "No linked account was found."
+      });
+    }
+
+    db[username].status = "active";
+    db[username].moderationHistory ||= [];
+
+    db[username].moderationHistory.push({
+      action: "enabled",
+      by: interaction.user.id,
+      at: now()
+    });
+
+    if (!writeDB(db)) {
+      return interaction.editReply({
+        content: "Could not save the account change."
+      });
+    }
+
+    const embed = createNotificationEmbed(
+      "Account Enabled",
+      "Your JJSTUDIOS account has been enabled again."
+    ).addFields(
+      { name: "Enabled By", value: interaction.user.toString(), inline: true },
+      { name: "Time", value: `<t:${Math.floor(now() / 1000)}:F>`, inline: true }
+    );
+
+    const dmResult = await sendAccountDM(targetUser.id, embed);
+
+    return interaction.editReply({
+      content: `Enabled ${targetUser}'s account. Buyer DM: ${dmResult.sent ? "Sent" : "Not delivered"}.`
+    });
+  }
+
+  // Edit products
+  if (subcommand === "editproducts") {
+    const targetUser = interaction.options.getUser("user");
+    const products = getProductsFromChoice(
+      interaction.options.getString("products")
+    );
+
+    const username = findAccountByDiscordId(db, targetUser.id);
+
+    if (!username) {
+      return interaction.editReply({
+        content: "No linked account was found."
+      });
+    }
+
+    let targetMember;
+
+    try {
+      targetMember = await interaction.guild.members.fetch(targetUser.id);
+    } catch {
+      return interaction.editReply({
+        content: "The buyer must be in the server to update their product roles."
+      });
+    }
+
+    try {
+      await setProductRoles(targetMember, products);
+    } catch (error) {
+      console.error("[EDIT PRODUCTS ROLE ERROR]", error);
+
+      return interaction.editReply({
+        content: "Could not update the buyer's Discord roles. Check the bot's role permissions and role position."
+      });
+    }
+
+    db[username].allowedScripts = products;
+
+    if (!writeDB(db)) {
+      return interaction.editReply({
+        content: "The roles were changed, but the database could not be saved. Check the database."
+      });
+    }
+
+    const embed = createNotificationEmbed(
+      "Product Access Updated",
+      "Your JJSTUDIOS product access has been updated."
+    ).addFields({
+      name: "Your Products",
+      value: getProductNames(products),
+      inline: false
+    });
+
+    const dmResult = await sendAccountDM(targetUser.id, embed);
+
+    return interaction.editReply({
+      content:
+        `Updated products for ${targetUser}.\n` +
+        `**Products:** ${getProductNames(products)}\n` +
+        `**Buyer DM:** ${dmResult.sent ? "Sent" : "Not delivered"}`
+    });
+  }
+
+  // Lookup
+  if (subcommand === "lookup") {
+    const usernameInput = safeString(
+      interaction.options.getString("username")
+    );
+
+    const targetUser = interaction.options.getUser("user");
+
+    if (!usernameInput && !targetUser) {
+      return interaction.editReply({
+        content: "Provide a username or Discord user."
+      });
+    }
+
+    const username = usernameInput ||
+      findAccountByDiscordId(db, targetUser.id);
+
+    if (!username || !db[username]) {
+      return interaction.editReply({
+        content: "Account not found."
+      });
+    }
+
+    return interaction.editReply({
+      embeds: [createAccountInfoEmbed(username, db[username])]
+    });
+  }
+
+  // Staff panel
+  if (subcommand === "adminpanel") {
+    const channel = interaction.options.getChannel("channel");
+
+    if (!channel?.isTextBased() || !channel.send) {
+      return interaction.editReply({
+        content: "Select a valid text channel."
+      });
+    }
+
+    await channel.send({
+      embeds: [createStaffPanelEmbed()]
+    });
+
+    return interaction.editReply({
+      content: `JJSTUDIOS staff panel sent to ${channel}.`
+    });
+  }
+
+  // API/system check
+  if (subcommand === "apicheck") {
+    let databaseStatus = "Unavailable";
+
+    try {
+      const testDB = readDB();
+      databaseStatus = testDB && typeof testDB === "object"
+        ? "Readable"
+        : "Invalid";
+    } catch {}
+
+    const loadedScripts = Object.keys(SCRIPTS).filter(
+      (name) => Boolean(SCRIPTS[name])
+    );
+
+    const secretConfigured = Boolean(process.env.ACCOUNTS_API_SECRET);
+
+    const embed = new EmbedBuilder()
+      .setColor(PINK)
+      .setTitle("JJSTUDIOS Account System Check")
+      .addFields(
+        {
+          name: "Database",
+          value: databaseStatus,
+          inline: true
+        },
+        {
+          name: "Account Endpoint",
+          value: "Configured",
+          inline: true
+        },
+        {
+          name: "Shared Secret",
+          value: secretConfigured ? "Configured" : "Missing",
+          inline: true
+        },
+        {
+          name: "Loaded Scripts",
+          value: loadedScripts.length
+            ? loadedScripts.join(", ")
+            : "None",
+          inline: false
+        },
+        {
+          name: "Server",
+          value: "Online",
+          inline: true
+        }
+      )
+      .setFooter({ text: "JJSTUDIOS · System Diagnostics" })
+      .setTimestamp();
+
+    return interaction.editReply({
+      embeds: [embed]
+    });
+  }
+}
+
+// =====================================================
+// INTERACTION HANDLER
+// =====================================================
+
+client.on("interactionCreate", async (interaction) => {
+  try {
+    // ---------------- BUTTONS ----------------
+
+    if (interaction.isButton()) {
+      if (interaction.customId.startsWith("jj_accounts_")) {
+        const db = readDB();
+        const username = findAccountByDiscordId(db, interaction.user.id);
+
+        if (!username || !db[username]) {
+          return interaction.reply({
+            content: "You do not have a linked JJSTUDIOS account.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const account = db[username];
+        const action = interaction.customId.slice("jj_accounts_".length);
+
+        if (action === "refresh") {
+          return interaction.update({
+            embeds: [createCustomerProfileEmbed(interaction.user, account)],
+            components: createCustomerProfileComponents()
+          });
+        }
+
+        if (action === "reset") {
+          const lastReset = Number(account.lastHwidReset) || 0;
+
+          if (now() - lastReset < RESET_COOLDOWN) {
+            const minutesLeft = Math.ceil(
+              (RESET_COOLDOWN - (now() - lastReset)) / 60000
+            );
+
+            return interaction.reply({
+              content: `Your HWID reset cooldown is active. Try again in ${minutesLeft} minute(s).`,
+              flags: MessageFlags.Ephemeral
+            });
+          }
+
+          account.hwid = null;
+          account.hwidLockedAt = null;
+          account.lastHwidReset = now();
+          account.hwidResetHistory ||= [];
+
+          account.hwidResetHistory.push({
+            requestedAt: now(),
+            discordId: interaction.user.id
+          });
+
+          if (!writeDB(db)) {
+            return interaction.reply({
+              content: "The reset could not be saved. Please try again.",
+              flags: MessageFlags.Ephemeral
+            });
+          }
+
+          await sendAccountDM(
+            account.discordId,
+            createHwidResetEmbed({
+              ...account,
+              username
+            })
+          );
+
+          return interaction.update({
+            embeds: [createCustomerProfileEmbed(interaction.user, account)],
+            components: createCustomerProfileComponents()
+          });
+        }
+
+        const messages = {
+          issues: "Known issues are not published yet.",
+          updates: "There are no published JJSTUDIOS updates yet.",
+          tickets: `You have ${(account.tickets || []).length} ticket(s) on your account.`,
+          notifications: "Account notifications are sent by direct message."
+        };
+
+        return interaction.reply({
+          content: messages[action] || "This action is unavailable.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // Main customer panel buttons
+      if (interaction.customId.startsWith("jc_")) {
+        const action = interaction.customId.slice(3);
+
+        const validActions = [
+          "register",
+          "key",
+          "main",
+          "mobilemain",
+          "resethwid"
+        ];
+
+        if (!validActions.includes(action)) return;
+
+        const member = await getMemberRoles(interaction.user.id);
+
+        const roleMap = {
+          register: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
+          key: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
+          main: [MAIN_ACCESS_ROLE],
+          mobilemain: [MOBILE_MAIN_ROLE],
+          resethwid: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE]
+        };
+
+        if (!hasAccess(member, roleMap[action])) {
+          return interaction.reply({
+            content: "You do not have access to use this button.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        return interaction.showModal(createPanelModal(action));
+      }
+
+      return;
+    }
+
+    // ---------------- MODALS ----------------
+
+    if (interaction.isModalSubmit()) {
+      if (!interaction.customId.startsWith("jc_modal_")) return;
+
+      const action = interaction.customId.slice(9);
+      const member = await getMemberRoles(interaction.user.id);
+
+      if (!member) {
+        return interaction.reply({
+          content: "You are not in the JJSTUDIOS server.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const roleMap = {
         register: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
         key: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
         main: [MAIN_ACCESS_ROLE],
@@ -1003,577 +1899,352 @@ client.on("interactionCreate", async (interaction) => {
         resethwid: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE]
       };
 
-      if (!hasAccess(member, buttonRoleMap[action])) {
+      if (!hasAccess(member, roleMap[action] || [])) {
         return interaction.reply({
-          content: getPanelAccessMessage(action),
+          content: "You do not have permission to use this action.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      return interaction.showModal(createPanelModal(action));
-    }
+      const username = safeString(
+        interaction.fields.getTextInputValue("username")
+      );
 
-    return;
-  }
+      const password = interaction.fields.getTextInputValue("password");
+      const db = readDB();
 
-  if (interaction.isModalSubmit()) {
-    if (!interaction.customId.startsWith("jc_modal_")) return;
-
-    const action = interaction.customId.slice(9);
-
-    const username = interaction.fields
-      .getTextInputValue("username")
-      .trim()
-      .toLowerCase();
-
-    const password = interaction.fields.getTextInputValue("password");
-
-    const db = readDB();
-
-    if (!member) {
-      return interaction.reply({
-        content: "You are not in the Jamari server.",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    const actionRoleMap = {
-      register: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
-      key: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE],
-      main: [MAIN_ACCESS_ROLE],
-      mobilemain: [MOBILE_MAIN_ROLE],
-      resethwid: [MAIN_ACCESS_ROLE, MOBILE_MAIN_ROLE]
-    };
-
-    if (!hasAccess(member, actionRoleMap[action] || [])) {
-      return interaction.reply({
-        content: getPanelAccessMessage(action),
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    if (action === "register") {
-      if (username === "__meta" || db[username]) {
-        return interaction.reply({
-          content:
-            db[username]
-              ? "This username is already taken"
-              : "This username is reserved",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      if (
-        getAccountKeys(db).some(
-          (name) => db[name].discordId === interaction.user.id
-        )
-      ) {
-        return interaction.reply({
-          content: "You already have an account.",
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      const grantedScripts = getGrantedScriptsForMember(member);
-      const createdAt = now();
-
-      db[username] = {
-        password,
-        key: generateKey(),
-        hwid: null,
-        hwidLockedAt: null,
-        lastHwidReset: 0,
-        status: "active",
-        allowedScripts: grantedScripts.length
-          ? grantedScripts
-          : ["mobile"],
-        discordId: interaction.user.id,
-        keyCreatedAt: createdAt
-      };
-
-      writeDB(db);
-
-      try {
-        const logChannel = await client.channels.fetch(
-          ACCOUNT_CREATED_LOG_CHANNEL_ID
-        );
-
-        if (
-          !logChannel ||
-          !logChannel.isTextBased() ||
-          typeof logChannel.send !== "function"
-        ) {
-          throw new Error(
-            "Account log channel is unavailable or is not a text channel."
-          );
+      if (action === "register") {
+        if (!username || username === "__meta" || db[username]) {
+          return interaction.reply({
+            content: "That username is unavailable.",
+            flags: MessageFlags.Ephemeral
+          });
         }
 
-        const accountCreatedEmbed = new EmbedBuilder()
-          .setColor(0xF2A9D4)
-          .setTitle("NEW ACCOUNT CREATED")
-          .setDescription(
-            "A new JJSTUDIOS account has been registered."
-          )
-          .addFields(
-            {
-              name: "Username",
-              value: "`" + username + "`",
-              inline: true
-            },
-            {
-              name: "Discord User",
-              value: interaction.user.toString(),
-              inline: true
-            },
-            {
-              name: "Discord ID",
-              value: interaction.user.id,
-              inline: false
-            },
-            {
-              name: "Scripts",
-              value:
-                (db[username].allowedScripts || []).join(", ") || "None",
-              inline: true
-            },
-            {
-              name: "Status",
-              value: "Active",
-              inline: true
-            },
-            {
-              name: "Created",
-              value: "<t:" + Math.floor(createdAt / 1000) + ":F>",
-              inline: false
-            }
-          )
-          .setFooter({ text: "JJSTUDIOS" })
-          .setTimestamp(new Date(createdAt));
+        if (findAccountByDiscordId(db, interaction.user.id)) {
+          return interaction.reply({
+            content: "You already have a linked account.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
-        await logChannel.send({
-          embeds: [accountCreatedEmbed]
-        });
-      } catch (logError) {
-        console.error("[ACCOUNT CREATED LOG ERROR]", logError);
-      }
+        const products = getGrantedScriptsForMember(member);
+        const createdAt = now();
 
-      return interaction.reply({
-        content:
-          "**Account Created!**\n" +
-          "• **Username:** `" + username + "`\n" +
-          "• **Key:** `" + db[username].key + "`\n" +
-          "• **Expires On:** " + formatDate(createdAt + KEY_LIFETIME) + "\n" +
-          "• **Scripts:** " +
-          (db[username].allowedScripts || []).join(", ") +
-          "\n" +
-          "• **Device Lock:** Open",
-        flags: MessageFlags.Ephemeral
-      });
-    }
+        db[username] = {
+          ...createAccountRecord(
+            username,
+            password,
+            interaction.user.id,
+            products.length ? products : ["mobile"]
+          ),
+          createdAt
+        };
 
-    const account = db[username];
+        if (!writeDB(db)) {
+          return interaction.reply({
+            content: "Your account could not be saved.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
-    if (!account || account.password !== password) {
-      return interaction.reply({
-        content: "Account not found or incorrect password",
-        flags: MessageFlags.Ephemeral
-      });
-    }
+        await sendAccountLog(
+          new EmbedBuilder()
+            .setColor(PINK)
+            .setTitle("NEW ACCOUNT CREATED")
+            .addFields(
+              { name: "Username", value: "`" + username + "`", inline: true },
+              { name: "Discord User", value: interaction.user.toString(), inline: true },
+              { name: "Products", value: getProductNames(db[username].allowedScripts), inline: true },
+              { name: "Created", value: `<t:${Math.floor(createdAt / 1000)}:F>`, inline: false }
+            )
+            .setTimestamp()
+        );
 
-    if (account.status === "disabled") {
-      return interaction.reply({
-        content: "This account is banned",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    if (action === "key") {
-      return interaction.reply({
-        content: "Your key is: `" + account.key + "`",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    if (action === "resethwid") {
-      if (now() - (account.lastHwidReset || 0) < RESET_COOLDOWN) {
         return interaction.reply({
-          content: "Cooldown active. You can reset once every 15 minutes.",
+          content:
+            "**Account Created!**\n" +
+            `**Username:** \`${username}\`\n` +
+            `**Key:** \`${db[username].key}\`\n` +
+            `**Expires:** ${formatDate(createdAt + KEY_LIFETIME)}\n` +
+            `**Products:** ${getProductNames(db[username].allowedScripts)}`,
           flags: MessageFlags.Ephemeral
         });
       }
 
-      account.hwid = null;
-      account.lastHwidReset = now();
+      const account = db[username];
 
-      writeDB(db);
-
-      return interaction.reply({
-        content: "HWID reset!",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    const inputKey = interaction.fields
-      .getTextInputValue("key")
-      .trim();
-
-    if (account.key !== inputKey) {
-      return interaction.reply({
-        content: "Invalid key.",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    const requestedScript =
-      action === "main" ? "main" : "mobile";
-
-    if (!account.allowedScripts.includes(requestedScript)) {
-      return interaction.reply({
-        content: "No access.",
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
-    const loader = createLuaTemplate(
-      username,
-      inputKey,
-      requestedScript,
-      requestedScript === "main"
-        ? "Jamari Main"
-        : "Jamari Mobile"
-    );
-
-    return interaction.reply({
-      content: "```lua\n" + loader + "```",
-      flags: MessageFlags.Ephemeral
-    });
-  }
-
-  if (!interaction.isChatInputCommand()) return;
-
-  try {
-    const db = readDB();
-
-    // Customer /accounts has been moved to the Ticket Bot.
-    // The admin /jamari accounts subcommand remains below.
-
-    if (interaction.commandName !== "jamari") return;
-
-    const subcommand = interaction.options.getSubcommand();
-
-    if (subcommand === "panel") {
-      if (
-        !hasAccess(
-          await getMemberRoles(interaction.user.id),
-          USERINFO_ROLES
-        )
-      ) {
+      if (!account || account.password !== password) {
         return interaction.reply({
-          content: "**No Access**",
+          content: "Account not found or incorrect password.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      return interaction.reply(createPanel());
-    }
-
-    if (subcommand === "setpanel") {
-      if (
-        !hasAccess(
-          await getMemberRoles(interaction.user.id),
-          USERINFO_ROLES
-        )
-      ) {
+      if (account.status !== "active" || isExpired(account)) {
         return interaction.reply({
-          content: "**No Access**",
+          content: "This account is disabled or expired.",
           flags: MessageFlags.Ephemeral
         });
       }
 
-      const targetChannel = interaction.options.getChannel("channel");
-
-      if (
-        !targetChannel ||
-        typeof targetChannel.send !== "function"
-      ) {
+      if (action === "key") {
         return interaction.reply({
-          content: "Please select a valid text channel.",
+          content: `Your key is: \`${account.key}\``,
           flags: MessageFlags.Ephemeral
         });
       }
 
-      await targetChannel.send(createPanel());
+      if (action === "resethwid") {
+        if (now() - (Number(account.lastHwidReset) || 0) < RESET_COOLDOWN) {
+          return interaction.reply({
+            content: "Cooldown active. You can reset once every 15 minutes.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        account.hwid = null;
+        account.hwidLockedAt = null;
+        account.lastHwidReset = now();
+        account.hwidResetHistory ||= [];
+
+        account.hwidResetHistory.push({
+          requestedAt: now(),
+          discordId: interaction.user.id
+        });
+
+        if (!writeDB(db)) {
+          return interaction.reply({
+            content: "The reset could not be saved.",
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        await sendAccountDM(
+          account.discordId,
+          createHwidResetEmbed({
+            ...account,
+            username
+          })
+        );
+
+        return interaction.reply({
+          content: "Your HWID has been reset. A confirmation DM was sent if your DMs are open.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const inputKey = interaction.fields.getTextInputValue("key").trim();
+
+      if (account.key !== inputKey) {
+        return interaction.reply({
+          content: "Invalid key.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const requestedScript = action === "main" ? "main" : "mobile";
+
+      if (!account.allowedScripts?.includes(requestedScript)) {
+        return interaction.reply({
+          content: "You do not have access to this product.",
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      const loader = createLuaTemplate(
+        username,
+        inputKey,
+        requestedScript,
+        requestedScript === "main" ? "JJSTUDIOS Main" : "JJSTUDIOS Mobile"
+      );
 
       return interaction.reply({
-        content:
-          "Panel sent to " +
-          targetChannel.toString() +
-          ".",
+        content: "```lua\n" + loader.slice(0, 1800) + "\n```",
         flags: MessageFlags.Ephemeral
       });
     }
+
+    // ---------------- SLASH COMMANDS ----------------
+
+    if (!interaction.isChatInputCommand()) return;
 
     await interaction.deferReply({
       flags: MessageFlags.Ephemeral
     });
 
-    const currentMember = await getMemberRoles(interaction.user.id);
+    if (interaction.commandName === "jjstudios") {
+      return handleJJStudiosCommand(interaction);
+    }
 
-    if (!currentMember) {
+    if (interaction.commandName !== "jamari") return;
+
+    const subcommand = interaction.options.getSubcommand();
+    const db = readDB();
+
+    if (["panel", "setpanel"].includes(subcommand)) {
+      const member = await getMemberRoles(interaction.user.id);
+
+      if (!isStaff(member)) {
+        return interaction.editReply({
+          content: "You do not have permission to use this command."
+        });
+      }
+
+      if (subcommand === "panel") {
+        return interaction.editReply(createPanel());
+      }
+
+      const channel = interaction.options.getChannel("channel");
+
+      if (!channel?.isTextBased() || !channel.send) {
+        return interaction.editReply({
+          content: "Select a valid text channel."
+        });
+      }
+
+      await channel.send(createPanel());
+
       return interaction.editReply({
-        content: "Not In Server"
+        content: `Panel sent to ${channel}.`
       });
     }
 
-    if (
-      ["showuserinfo", "accounts", "revoke"].includes(subcommand) &&
-      !hasAccess(currentMember, USERINFO_ROLES)
-    ) {
-      return interaction.editReply({
-        content: "**No Access**"
-      });
+    if (["showuserinfo", "accounts", "revoke"].includes(subcommand)) {
+      const member = await getMemberRoles(interaction.user.id);
+
+      if (!isStaff(member)) {
+        return interaction.editReply({
+          content: "You do not have permission to use this command."
+        });
+      }
     }
 
-    const inputUser = interaction.options
-      .getString("username")
-      ?.trim()
-      .toLowerCase();
-
-    const inputPass = interaction.options.getString("password");
-    const targetUser = inputUser ? db[inputUser] : null;
-
-    function checkCredentials(customUser, customPass) {
-      if (customUser === undefined) customUser = targetUser;
-      if (customPass === undefined) customPass = inputPass;
-
-      if (!customUser) {
-        interaction.editReply({
-          content: "Account not found."
-        }).catch(() => {});
-
-        return false;
-      }
-
-      if (customUser.password !== customPass) {
-        interaction.editReply({
-          content: "Incorrect password"
-        }).catch(() => {});
-
-        return false;
-      }
-
-      if (customUser.status === "disabled") {
-        interaction.editReply({
-          content: "This account is banned"
-        }).catch(() => {});
-
-        return false;
-      }
-
-      return true;
-    }
+    const username = safeString(
+      interaction.options.getString("username")
+    );
 
     if (subcommand === "accountstatus") {
-      if (!checkCredentials()) return;
+      const password = interaction.options.getString("password");
+      const account = db[username];
 
-      const keyCreatedAt = targetUser.keyCreatedAt || now();
+      if (!account || account.password !== password) {
+        return interaction.editReply({
+          content: "Account not found or incorrect password."
+        });
+      }
 
-      const left = Math.max(
-        0,
-        Math.ceil(
-          (KEY_LIFETIME - (now() - keyCreatedAt)) /
-          (1000 * 60 * 60 * 24)
-        )
-      );
+      const expiration = getExpiration(account);
+      const daysLeft = expiration
+        ? Math.max(0, Math.ceil((expiration - now()) / 86400000))
+        : 0;
 
       return interaction.editReply({
         content:
-          "### Account Check: [" + inputUser + "]\n" +
-          "• **Status:** `" + targetUser.status + "`\n" +
-          "• **Device Lock:** `" +
-          (targetUser.hwid ? "Locked" : "Open") +
-          "`\n" +
-          "• **Expires On:** " +
-          formatDate(keyCreatedAt + KEY_LIFETIME) +
-          "\n" +
-          "• **Days Left:** " +
-          left +
-          " day(s)"
+          `**Account:** \`${username}\`\n` +
+          `**Status:** ${account.status || "active"}\n` +
+          `**HWID:** ${account.hwid ? "Locked" : "Open"}\n` +
+          `**Products:** ${getProductNames(account.allowedScripts || [])}\n` +
+          `**Expires:** ${expiration ? formatDate(expiration) : "Unavailable"}\n` +
+          `**Days Left:** ${daysLeft}`
       });
     }
 
     if (subcommand === "changepassword") {
-      const oldPass = interaction.options.getString("old_password");
+      const oldPassword = interaction.options.getString("old_password");
+      const newPassword = interaction.options.getString("new_password");
+      const account = db[username];
 
-      if (!checkCredentials(targetUser, oldPass)) return;
+      if (!account || account.password !== oldPassword) {
+        return interaction.editReply({
+          content: "Account not found or incorrect password."
+        });
+      }
 
-      db[inputUser].password =
-        interaction.options.getString("new_password");
+      account.password = newPassword;
 
-      writeDB(db);
+      if (!writeDB(db)) {
+        return interaction.editReply({
+          content: "Could not save the new password."
+        });
+      }
 
       return interaction.editReply({
-        content: "Password changed"
+        content: "Password changed successfully."
       });
     }
 
     if (subcommand === "showuserinfo") {
-      const lookupUsername = interaction.options
-        .getString("lookup")
-        ?.trim()
-        .toLowerCase();
+      const lookup = safeString(
+        interaction.options.getString("lookup")
+      );
 
-      if (!lookupUsername) {
-        return interaction.editReply({
-          content: "Please enter a username!"
-        });
-      }
-
-      if (
-        lookupUsername === "__meta" ||
-        !db[lookupUsername]
-      ) {
+      if (!lookup || !db[lookup]) {
         return interaction.editReply({
           content: "Account not found."
         });
       }
 
-      const account = db[lookupUsername];
-
       return interaction.editReply({
-        content:
-          "**User Info — `" + lookupUsername + "`**\n" +
-          "• **Username:** `" + lookupUsername + "`\n" +
-          "• **Password:** `" + account.password + "`\n" +
-          "• **Key:** `" + account.key + "`\n" +
-          "• **Scripts:** `" +
-          (account.allowedScripts || []).join(", ") +
-          "`\n" +
-          "• **Status:** `" +
-          (account.status || "active") +
-          "`",
-        flags: MessageFlags.Ephemeral
+        embeds: [createAccountInfoEmbed(lookup, db[lookup])]
       });
     }
 
-    // ADMIN-ONLY /jamari accounts
     if (subcommand === "accounts") {
-      const accountList = getAccountKeys(db);
+      const names = getAccountKeys(db);
 
-      if (accountList.length === 0) {
+      if (!names.length) {
         return interaction.editReply({
-          content: "No accounts found in the database."
+          content: "No accounts found."
         });
       }
 
-      const lines = accountList.map((x) => {
-        const acct = db[x];
-        const status = acct.status || "active";
-        const locked = acct.hwid ? "Locked" : "Open";
-        const scripts = (acct.allowedScripts || []).join(", ");
+      const lines = names.map((name) => {
+        const account = db[name];
 
         return (
-          "• **" + x + "** — Status: `" + status +
-          "` — Device: `" + locked +
-          "` — Scripts: `" + scripts + "`"
+          `• **${name}** — ${account.status || "active"} — ` +
+          `${getProductNames(account.allowedScripts || [])} — ` +
+          `${account.hwid ? "HWID Locked" : "HWID Open"}`
         );
       });
 
-      let current = "";
-      const chunks = [];
+      const output = lines.join("\n");
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        if ((current + "\n" + line).length > 3900) {
-          chunks.push(current);
-          current = line;
-        } else {
-          current = current
-            ? current + "\n" + line
-            : line;
-        }
-      }
-
-      if (current) chunks.push(current);
-
-      if (chunks.length === 1) {
-        return interaction.editReply({
-          content:
-            "**Registered Accounts (" +
-            accountList.length +
-            ")**\n" +
-            chunks[0]
-        });
-      }
-
-      await interaction.editReply({
-        content:
-          "Found " +
-          accountList.length +
-          " accounts (split across " +
-          chunks.length +
-          " messages):"
+      return interaction.editReply({
+        content: output.slice(0, 1900)
       });
-
-      for (let i = 0; i < chunks.length; i++) {
-        await interaction.followUp({
-          content:
-            "**(" +
-            (i + 1) +
-            "/" +
-            chunks.length +
-            ")**\n" +
-            chunks[i],
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
-      return;
     }
 
     if (subcommand === "revoke") {
-      const discordUser = interaction.options.getUser("user");
+      const targetUser = interaction.options.getUser("user");
+      const username = findAccountByDiscordId(db, targetUser.id);
 
-      if (!discordUser) {
+      if (!username) {
         return interaction.editReply({
-          content: "Provide a Discord user to revoke."
+          content: "No linked account found."
         });
       }
 
-      const accountName = findAccountByDiscordId(
-        db,
-        discordUser.id
-      );
+      db[username].status = "disabled";
+      db[username].allowedScripts = [];
 
-      if (accountName && db[accountName]) {
-        db[accountName].status = "disabled";
-        db[accountName].allowedScripts = [];
-
-        writeDB(db);
+      if (!writeDB(db)) {
+        return interaction.editReply({
+          content: "Could not save the account change."
+        });
       }
 
       return interaction.editReply({
-        content:
-          "**Access revoked**\n" +
-          "• **Discord:** " + discordUser.username + "\n" +
-          "• **Loader account:** " +
-          (
-            accountName
-              ? "`" + accountName + "` (disabled)"
-              : "[none]"
-          )
+        content: `Disabled the account for ${targetUser}. Use \`/jjstudios revoke\` to delete an account completely.`
       });
     }
 
     return interaction.editReply({
       content: "Unknown command."
     });
-  } catch (err) {
-    console.error(
-      "[CRASH SHIELD] Intercepted interaction fault:",
-      err
-    );
+  } catch (error) {
+    console.error("[INTERACTION ERROR]", error);
 
     try {
       if (interaction.deferred || interaction.replied) {
@@ -1586,195 +2257,49 @@ client.on("interactionCreate", async (interaction) => {
           flags: MessageFlags.Ephemeral
         });
       }
-    } catch (_) {}
+    } catch {}
   }
 });
 
-// ---------------- AUTOMATIC ROLE SYNC ----------------
+// =====================================================
+// AUTOMATIC ROLE SYNC
+// =====================================================
 
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   try {
     const db = readDB();
+    const username = findAccountByDiscordId(db, newMember.id);
 
-    const linkedAccountName = getAccountKeys(db).find(
-      (name) =>
-        db[name] &&
-        String(db[name].discordId) === String(newMember.id)
-    );
+    if (!username || !db[username]) return;
 
-    if (!linkedAccountName) return;
+    // Keep deleted/disabled accounts from regaining products.
+    if (db[username].status !== "active") return;
 
     const oldRoles = oldMember.roles.cache;
     const newRoles = newMember.roles.cache;
 
-    if (
-      oldRoles.size === newRoles.size &&
-      [...oldRoles.keys()].every((key) => newRoles.has(key))
-    ) {
-      return;
-    }
+    const changed =
+      oldRoles.size !== newRoles.size ||
+      ![...oldRoles.keys()].every((roleId) => newRoles.has(roleId));
 
-    const allowedScripts = getGrantedScriptsForMember(newMember);
+    if (!changed) return;
 
-    db[linkedAccountName].allowedScripts = allowedScripts;
-
+    db[username].allowedScripts = getGrantedScriptsForMember(newMember);
     writeDB(db);
-  } catch (err) {
-    console.error("[AUTO-SYNC ERROR]", err);
+  } catch (error) {
+    console.error("[AUTO ROLE SYNC ERROR]", error);
   }
 });
 
-// ---------------- SLASH COMMAND REGISTRATION ----------------
-
-function buildCommands() {
-  const builder = new SlashCommandBuilder()
-    .setName("jamari")
-    .setDescription("Loader commands");
-
-  try {
-    if (typeof InteractionContextType !== "undefined") {
-      builder.setContexts(
-        InteractionContextType.Guild,
-        InteractionContextType.BotDM,
-        InteractionContextType.PrivateChannel
-      );
-    } else {
-      builder.setContexts(0, 1, 2);
-    }
-
-    if (typeof ApplicationIntegrationType !== "undefined") {
-      builder.setIntegrationTypes(
-        ApplicationIntegrationType.GuildInstall,
-        ApplicationIntegrationType.UserInstall
-      );
-    } else {
-      builder.setIntegrationTypes(0, 1);
-    }
-  } catch (e) {
-    console.log(
-      "[CMDS] Context/integration types not supported:",
-      e.message
-    );
-  }
-
-  builder
-    .addSubcommand((sub) =>
-      sub
-        .setName("panel")
-        .setDescription("Open the Jamari scripts panel")
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("setpanel")
-        .setDescription("Send the panel to a selected channel")
-        .addChannelOption((o) =>
-          o
-            .setName("channel")
-            .setDescription("The channel to send the panel to")
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("accountstatus")
-        .setDescription("Check your account status")
-        .addStringOption((o) =>
-          o
-            .setName("username")
-            .setDescription("Your loader username")
-            .setRequired(true)
-        )
-        .addStringOption((o) =>
-          o
-            .setName("password")
-            .setDescription("Your loader password")
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("changepassword")
-        .setDescription("Change your password")
-        .addStringOption((o) =>
-          o
-            .setName("username")
-            .setDescription("Your loader username")
-            .setRequired(true)
-        )
-        .addStringOption((o) =>
-          o
-            .setName("old_password")
-            .setDescription("Current password")
-            .setRequired(true)
-        )
-        .addStringOption((o) =>
-          o
-            .setName("new_password")
-            .setDescription("New password")
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("showuserinfo")
-        .setDescription("View any account's username, password and key")
-        .addStringOption((o) =>
-          o
-            .setName("lookup")
-            .setDescription("The username to inspect")
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("accounts")
-        .setDescription("List all registered accounts")
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("revoke")
-        .setDescription("Revoke access")
-        .addUserOption((o) =>
-          o
-            .setName("user")
-            .setDescription("Discord user to revoke")
-            .setRequired(true)
-        )
-    );
-
-  const json = builder.toJSON();
-
-  json.dm_permission = true;
-  json.contexts = [0, 1, 2];
-  json.integration_types = [0, 1];
-
-  // Only register /jamari.
-  // Customer /accounts is now handled by the Ticket Bot.
-  return [json];
-}
-
-const commandLayouts = buildCommands();
-
-// ---------------- PRIVATE CUSTOMER ACCOUNTS API ----------------
-
-// Ticket Bot requests:
-// GET /api/account/DISCORD_USER_ID
-//
-// Required header:
-// x-api-secret: the shared ACCOUNTS_API_SECRET
-//
-// This endpoint returns one linked account only.
-// It never returns passwords, keys, or raw HWIDs.
+// =====================================================
+// PRIVATE TICKET BOT ACCOUNT ENDPOINT
+// =====================================================
 
 app.get("/api/account/:discordId", (req, res) => {
   const secret = process.env.ACCOUNTS_API_SECRET;
   const providedSecret = req.get("x-api-secret");
 
-  if (
-    !secret ||
-    !providedSecret ||
-    providedSecret !== secret
-  ) {
+  if (!secret || !providedSecret || providedSecret !== secret) {
     return res.status(401).json({
       success: false,
       message: "Unauthorized"
@@ -1792,7 +2317,6 @@ app.get("/api/account/:discordId", (req, res) => {
 
   try {
     const db = readDB();
-
     const username = findAccountByDiscordId(db, discordId);
 
     if (!username || !db[username]) {
@@ -1803,18 +2327,7 @@ app.get("/api/account/:discordId", (req, res) => {
     }
 
     const account = db[username];
-
     const keyCreatedAt = Number(account.keyCreatedAt) || null;
-
-    const expiresAt = keyCreatedAt
-      ? keyCreatedAt + KEY_LIFETIME
-      : null;
-
-    const scripts = Array.isArray(account.allowedScripts)
-      ? account.allowedScripts.filter(
-          (script) => typeof script === "string"
-        )
-      : [];
 
     res.set("Cache-Control", "no-store");
 
@@ -1823,15 +2336,19 @@ app.get("/api/account/:discordId", (req, res) => {
       account: {
         username,
         status: account.status || "active",
-        scripts,
+        scripts: Array.isArray(account.allowedScripts)
+          ? account.allowedScripts
+          : [],
         hwidLocked: Boolean(account.hwid),
         executions: Number(account.executions) || 0,
         keyCreatedAt,
-        expiresAt
+        expiresAt: keyCreatedAt
+          ? keyCreatedAt + KEY_LIFETIME
+          : null
       }
     });
   } catch (error) {
-    console.error("[ACCOUNT API ERROR]", error);
+    console.error("[ACCOUNT ENDPOINT ERROR]", error);
 
     return res.status(500).json({
       success: false,
@@ -1840,58 +2357,41 @@ app.get("/api/account/:discordId", (req, res) => {
   }
 });
 
-// ---------------- EXPRESS SERVER ----------------
+// =====================================================
+// EXPRESS SERVER
+// =====================================================
 
 app.listen(PORT, () => {
-  console.log(
-    "[EXPRESS SERVICE RUNNING] Listening on incoming gateway port " +
-    PORT
-  );
+  console.log(`[EXPRESS] JJSTUDIOS service listening on port ${PORT}`);
 });
 
-// ---------------- KEEP ALIVE ----------------
+// =====================================================
+// KEEP ALIVE
+// =====================================================
 
 const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000;
 
 function startKeepAlive() {
-  const urlStr =
+  const url =
     process.env.RENDER_EXTERNAL_URL ||
-    "http://localhost:" + PORT;
+    `http://localhost:${PORT}`;
 
-  const mod = urlStr.startsWith("https") ? https : http;
+  const protocol = url.startsWith("https") ? https : http;
 
   setInterval(() => {
-    mod.get(urlStr, { timeout: 5000 }, (res) => {
-      let d = "";
-
-      res.on("data", (c) => {
-        d += c;
-      });
-
-      res.on("end", () => {
-        try {
-          const j = JSON.parse(d);
-
-          if (j.status === "ok") {
-            console.log(
-              "[KEEP-ALIVE] Ping successful — " +
-              new Date().toLocaleTimeString()
-            );
-          }
-        } catch (_) {}
-      });
-    }).on("error", (err) => {
-      console.log(
-        "[KEEP-ALIVE] Ping failed (expected if just started): " +
-        err.message
-      );
+    protocol.get(url, { timeout: 5000 }, (response) => {
+      response.resume();
+    }).on("error", (error) => {
+      console.log("[KEEP ALIVE]", error.message);
     });
   }, KEEP_ALIVE_INTERVAL);
 }
 
 startKeepAlive();
 
-// ---------------- DM COMMANDS ----------------
+// =====================================================
+// DM COMMANDS
+// =====================================================
 
 client.on("messageCreate", async (message) => {
   try {
@@ -1899,290 +2399,170 @@ client.on("messageCreate", async (message) => {
 
     const content = (message.content || "").trim();
 
-    if (
-      !content.toLowerCase().startsWith("/jamari") &&
-      !content.toLowerCase().startsWith("!jamari")
-    ) {
-      return;
-    }
+    if (!content.toLowerCase().startsWith("!jamari")) return;
 
-    const db = readDB();
     const parts = content.split(/\s+/);
-    const sub = (parts[1] || "").toLowerCase();
+    const subcommand = (parts[1] || "").toLowerCase();
+    const db = readDB();
 
-    if (!sub || sub === "help") {
+    if (!subcommand || subcommand === "help") {
       return message.reply(
-        "**Jamari DM commands**\n" +
+        "**Jamari DM Commands**\n" +
         "`!jamari accountstatus <username> <password>`\n" +
         "`!jamari changepassword <username> <oldpass> <newpass>`\n" +
         "`!jamari key <username> <password>`"
       );
     }
 
-    if (sub === "accountstatus") {
-      const username = (parts[2] || "").toLowerCase();
-      const password = parts[3];
-      const account = db[username];
+    const username = safeString(parts[2]);
+    const password = parts[3];
+    const account = username ? db[username] : null;
 
-      if (!account || account.password !== password) {
-        return message.reply(
-          "Account not found or incorrect password"
-        );
-      }
+    if (!account || account.password !== password) {
+      return message.reply("Account not found or incorrect password.");
+    }
 
-      if (account.status === "disabled") {
-        return message.reply("This account is banned");
-      }
+    if (account.status !== "active" || isExpired(account)) {
+      return message.reply("This account is disabled or expired.");
+    }
 
-      const keyCreatedAt = account.keyCreatedAt || now();
-
-      const left = Math.max(
-        0,
-        Math.ceil(
-          (KEY_LIFETIME - (now() - keyCreatedAt)) /
-          (1000 * 60 * 60 * 24)
-        )
-      );
+    if (subcommand === "accountstatus") {
+      const expiration = getExpiration(account);
 
       return message.reply(
-        "### Account Check: [" + username + "]\n" +
-        "• **Status:** `" + account.status + "`\n" +
-        "• **Device Lock:** `" +
-        (account.hwid ? "Locked" : "Open") +
-        "`\n" +
-        "• **Expires On:** " +
-        formatDate(keyCreatedAt + KEY_LIFETIME) +
-        "\n" +
-        "• **Days Left:** " +
-        left +
-        " day(s)"
+        `**Account:** \`${username}\`\n` +
+        `**Status:** ${account.status}\n` +
+        `**Products:** ${getProductNames(account.allowedScripts || [])}\n` +
+        `**HWID:** ${account.hwid ? "Locked" : "Open"}\n` +
+        `**Expires:** ${expiration ? formatDate(expiration) : "Unavailable"}`
       );
     }
 
-    if (sub === "changepassword") {
-      const username = (parts[2] || "").toLowerCase();
-      const oldPass = parts[3];
-      const newPass = parts[4];
-      const account = db[username];
+    if (subcommand === "key") {
+      return message.reply(`Your key is: \`${account.key}\``);
+    }
 
-      if (!account || account.password !== oldPass) {
-        return message.reply(
-          "Account not found or incorrect password"
-        );
-      }
+    if (subcommand === "changepassword") {
+      const newPassword = parts[4];
 
-      if (account.status === "disabled") {
-        return message.reply("This account is banned");
-      }
-
-      if (!newPass) {
+      if (!newPassword) {
         return message.reply(
           "Usage: `!jamari changepassword <username> <oldpass> <newpass>`"
         );
       }
 
-      account.password = newPass;
+      account.password = newPassword;
 
-      writeDB(db);
-
-      return message.reply("Password changed");
-    }
-
-    if (sub === "key") {
-      const username = (parts[2] || "").toLowerCase();
-      const password = parts[3];
-      const account = db[username];
-
-      if (!account || account.password !== password) {
-        return message.reply(
-          "Account not found or incorrect password"
-        );
+      if (!writeDB(db)) {
+        return message.reply("Could not save the new password.");
       }
 
-      if (account.status === "disabled") {
-        return message.reply("This account is banned");
-      }
-
-      return message.reply(
-        "Your key is: `" + account.key + "`"
-      );
+      return message.reply("Password changed successfully.");
     }
 
-    return message.reply(
-      "Unknown subcommand. Type `!jamari help`"
-    );
-  } catch (err) {
-    console.error("[DM MESSAGE CMD ERROR]", err);
+    return message.reply("Unknown command. Type `!jamari help`.");
+  } catch (error) {
+    console.error("[DM COMMAND ERROR]", error);
 
     try {
       await message.reply("Something went wrong.");
-    } catch (_) {}
+    } catch {}
   }
 });
 
-// ---------------- ACCOUNT EXPIRATION REMINDERS ----------------
+// =====================================================
+// EXPIRATION NOTIFICATIONS
+// =====================================================
 
 let expirationNoticeCheckRunning = false;
 
 async function checkAccountExpirationNotices() {
-  if (
-    expirationNoticeCheckRunning ||
-    !client.isReady()
-  ) {
-    return;
-  }
+  if (expirationNoticeCheckRunning || !client.isReady()) return;
 
   expirationNoticeCheckRunning = true;
 
   try {
     const db = readDB();
-    const currentTime = now();
-
-    let databaseChanged = false;
+    let changed = false;
 
     for (const username of getAccountKeys(db)) {
       const account = db[username];
 
       if (
         !account ||
-        account.status === "disabled" ||
+        account.status !== "active" ||
         !account.discordId
       ) {
         continue;
       }
 
-      const createdAt = Number(account.keyCreatedAt);
+      const expiration = getExpiration(account);
 
-      if (
-        !Number.isFinite(createdAt) ||
-        createdAt <= 0
-      ) {
-        continue;
-      }
+      if (!expiration) continue;
 
-      const expiresAt = createdAt + KEY_LIFETIME;
-      const timeRemaining = expiresAt - currentTime;
+      const remaining = expiration - now();
 
-      if (timeRemaining <= 0) continue;
+      if (remaining <= 0) continue;
 
-      if (
-        !account.expirationNotices ||
-        typeof account.expirationNotices !== "object"
-      ) {
-        account.expirationNotices = {};
-      }
+      account.expirationNotices ||= {};
 
       let noticeKey = null;
-      let noticeLabel = null;
+      let noticeName = null;
 
-      if (timeRemaining <= EXPIRATION_NOTICE_15_HOURS) {
-        if (!account.expirationNotices.fifteenHoursSentAt) {
-          noticeKey = "fifteenHoursSentAt";
-          noticeLabel = "15-hour reminder";
-        }
-      } else if (timeRemaining <= EXPIRATION_NOTICE_3_DAYS) {
-        if (!account.expirationNotices.threeDaysSentAt) {
-          noticeKey = "threeDaysSentAt";
-          noticeLabel = "3-day reminder";
-        }
+      if (
+        remaining <= EXPIRATION_NOTICE_15_HOURS &&
+        !account.expirationNotices.fifteenHoursSentAt
+      ) {
+        noticeKey = "fifteenHoursSentAt";
+        noticeName = "15-hour reminder";
+      } else if (
+        remaining <= EXPIRATION_NOTICE_3_DAYS &&
+        !account.expirationNotices.threeDaysSentAt
+      ) {
+        noticeKey = "threeDaysSentAt";
+        noticeName = "3-day reminder";
       }
 
       if (!noticeKey) continue;
 
-      try {
-        const user = await client.users.fetch(
-          String(account.discordId)
-        );
+      const embed = createNotificationEmbed(
+        "Your Access Is Expiring Soon",
+        `Your JJSTUDIOS access is getting close to its expiration.\n\nThis is your ${noticeName}.`
+      ).addFields(
+        {
+          name: "Expires",
+          value: `<t:${Math.floor(expiration / 1000)}:F> · <t:${Math.floor(expiration / 1000)}:R>`,
+          inline: false
+        },
+        {
+          name: "Products",
+          value: getProductNames(account.allowedScripts || []),
+          inline: false
+        }
+      );
 
-        const productNames = (
-          Array.isArray(account.allowedScripts)
-            ? account.allowedScripts
-            : []
-        )
-          .map((script) =>
-            script === "main"
-              ? "Upgraded Main"
-              : script === "mobile"
-                ? "Mobile"
-                : String(script)
-          )
-          .join(", ") || "No active products";
+      const result = await sendAccountDM(account.discordId, embed);
 
-        const reminderEmbed = new EmbedBuilder()
-          .setColor(0xF2A9D4)
-          .setAuthor({
-            name: "JJSTUDIOS"
-          })
-          .setTitle("JJSTUDIOS Access")
-          .setDescription(
-            "Your access is getting close to its expiration.\n\n" +
-            "This is your " + noticeLabel + "."
-          )
-          .addFields(
-            {
-              name: "Expires",
-              value:
-                "<t:" +
-                Math.floor(expiresAt / 1000) +
-                ":F> · " +
-                "<t:" +
-                Math.floor(expiresAt / 1000) +
-                ":R>",
-              inline: false
-            },
-            {
-              name: "Products",
-              value: productNames.slice(0, 1024),
-              inline: false
-            }
-          )
-          .setFooter({
-            text: "JJSTUDIOS"
-          });
-
-        await user.send({
-          embeds: [reminderEmbed]
-        });
-
-        account.expirationNotices[noticeKey] = currentTime;
-        databaseChanged = true;
-
-        console.log(
-          "[EXPIRATION NOTICE] Sent " +
-          noticeLabel +
-          " to account " +
-          username
-        );
-      } catch (dmError) {
-        console.error(
-          "[EXPIRATION NOTICE] Could not DM account " +
-          username +
-          ":",
-          dmError.message
-        );
+      if (result.sent) {
+        account.expirationNotices[noticeKey] = now();
+        changed = true;
       }
     }
 
-    if (databaseChanged) {
-      writeDB(db);
-    }
+    if (changed) writeDB(db);
   } catch (error) {
-    console.error(
-      "[EXPIRATION NOTICE CHECK ERROR]",
-      error
-    );
+    console.error("[EXPIRATION CHECK ERROR]", error);
   } finally {
     expirationNoticeCheckRunning = false;
   }
 }
 
-// ---------------- BOT READY ----------------
+// =====================================================
+// BOT READY + COMMAND REGISTRATION
+// =====================================================
 
 client.once("ready", async () => {
-  console.log(
-    "[Bot Online] Logged into Discord as " +
-    client.user.tag
-  );
+  console.log(`[BOT ONLINE] Logged in as ${client.user.tag}`);
 
   checkAccountExpirationNotices();
 
@@ -2191,80 +2571,43 @@ client.once("ready", async () => {
     EXPIRATION_NOTICE_CHECK_INTERVAL
   );
 
-  const rest = new REST({
-    version: "10"
-  }).setToken(BOT_TOKEN);
+  const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
 
   try {
     await rest.put(
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      {
-        body: []
-      }
+      { body: [] }
     );
 
-    console.log("[CMDS] Cleared guild commands.");
-  } catch (err) {
-    console.error(
-      "[CMDS] Could not clear guild commands:",
-      err.message
-    );
+    console.log("[COMMANDS] Cleared old guild commands.");
+  } catch (error) {
+    console.error("[COMMANDS] Could not clear guild commands:", error.message);
   }
 
   try {
-    const globalCmds = await rest.put(
+    const registered = await rest.put(
       Routes.applicationCommands(CLIENT_ID),
-      {
-        body: commandLayouts
-      }
+      { body: commandLayouts }
     );
 
     console.log(
-      "[CMDS] Global commands registered: " +
-      globalCmds.length
+      `[COMMANDS] Registered ${registered.length} global commands.`
     );
-  } catch (err) {
-    console.error(
-      "[CMDS] Global register FAILED:",
-      err.message
-    );
+  } catch (error) {
+    console.error("[COMMANDS] Registration failed:", error);
 
-    if (err.rawError) {
-      console.error(
-        JSON.stringify(err.rawError, null, 2)
-      );
+    if (error.rawError) {
+      console.error(JSON.stringify(error.rawError, null, 2));
     }
   }
 });
 
-// ---------------- LOGIN ----------------
+// =====================================================
+// LOGIN
+// =====================================================
 
-console.log(
-  "[LOGIN] Starting Discord login... (token length=" +
-  String(BOT_TOKEN || "").length +
-  ")"
-);
+console.log("[LOGIN] Starting JJSTUDIOS bot...");
 
-if (
-  !BOT_TOKEN ||
-  String(BOT_TOKEN).length < 50
-) {
-  console.error(
-    "[LOGIN] BOT_TOKEN looks invalid or too short."
-  );
-}
-
-client.login(BOT_TOKEN).then(() => {
-  console.log(
-    "[LOGIN] client.login() resolved (waiting for ready event)..."
-  );
-}).catch((err) => {
-  console.error(
-    "[LOGIN FAILED]",
-    err && err.message ? err.message : err
-  );
-
-  if (err && err.code) {
-    console.error("[LOGIN FAILED] code:", err.code);
-  }
+client.login(BOT_TOKEN).catch((error) => {
+  console.error("[LOGIN FAILED]", error);
 });
